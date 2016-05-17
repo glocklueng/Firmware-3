@@ -1,0 +1,3882 @@
+/****************************************************                                                                                         
+* Microcontroller: STM32F103RBT6
+* Handware: JRMD1-V1.0
+* File: gui.c                              
+* Revision: 1.0  
+* Description: GUI API
+* Author: ValarHao
+* Date：2015.12.24
+****************************************************/
+#include "gui.h"
+#include "lcd.h"
+#include "24cxx.h"
+#include "my9221.h"
+#include "tm1829.h"
+#include "usart.h"
+#include "rf.h"
+#include "adc.h"
+
+OS_STK GUI_TASK_STK[GUI_STK_SIZE];
+
+u8 language;
+u8 job_mode;
+u8 modbus;
+const u8 software_version = 15;
+const u8 hardware_version = 11;
+
+u16 light_start_num = 1;
+u16 light_total = 1;
+u16 light_start_address = 1;
+
+u8 chip_type = PWM_OUTPUT;
+u8 gray_level = 16;
+u8 pwm_frequency = PWM_240HZ;
+u8 dmx_channel_total = 3;
+u8 output_type = 1;
+u8 serial_baud = BAUD_SELF;
+u8 output_polarity = VALID_HIGH;
+u8 chip_self_check = SELF_R_G_B;
+u8 half_power_output_temperature = 70;
+u8 close_light_temperature = 80;
+u8 colour_mode = 3;
+u8 gamma = GAMMA_2_2;
+
+u8 channel[CH_SIZE];
+
+u8 rotation_ch_status = 0;
+u16 rotation_ch_cnt = 1;
+
+u16 display_row;
+u8 pointer_row;
+u8 pointer_col;
+
+u16 last_display_row;
+u8 last_pointer_row;
+
+u8 colour_total = 3; //整体调节默认三色
+
+u8 pattern_step;
+u8 pattern_r, pattern_g, pattern_b, pattern_w;
+
+u8 packet_num;
+
+
+MenuDef *menu = NULL;
+
+/*------------------一级菜单分割线------------------*/
+static void GUI_display_main(void);
+MenuDef StartMenuVar = { MENU_INDEX_MAIN, 6, NULL, MainMenu, GUI_display_main };
+
+
+/*------------------二级菜单分割线------------------*/
+static void GUI_display_address(void);
+static void GUI_display_parameters(void);
+static void GUI_display_colour(void);
+static void GUI_display_pattern(void);
+static void GUI_display_setting(void);
+static void GUI_display_system(void);
+
+MenuDef MainMenu[6] = { 
+	{ MENU_INDEX_ADDRESS,     2, &StartMenuVar, AddressMenu,          GUI_display_address},
+	{ MENU_INDEX_PARAMETERS, 13, &StartMenuVar, &ParametersFinishMenuVar, GUI_display_parameters},
+	{ MENU_INDEX_COLOUR, COLOUR_MENU_SIZE, &StartMenuVar, ColourMenu,     GUI_display_colour},
+	{ MENU_INDEX_PATTERN,     6, &StartMenuVar, PatternMenu,          GUI_display_pattern},
+	{ MENU_INDEX_SETTING,     3, &StartMenuVar, NULL,                 GUI_display_setting},
+	{ MENU_INDEX_SYSTEM,      2, &StartMenuVar, NULL,                 GUI_display_system},
+};
+
+
+/*------------------三级菜单分割线------------------*/
+static void GUI_display_address_line(void);
+static void GUI_display_address_relay(void);
+MenuDef AddressMenu[2] = { 
+	{ MENU_INDEX_ADDRESS_LINE,  4, &MainMenu[0], &AddressLineFinishMenuVar, GUI_display_address_line },
+	{ MENU_INDEX_ADDRESS_RELAY, 4, &MainMenu[0], &AddressRelayFinishMenuVar, GUI_display_address_relay },
+};
+
+static void GUI_display_parameters_finish(void);
+MenuDef ParametersFinishMenuVar = { MENU_INDEX_PARAMETERS_FINISH, 1, &MainMenu[1], NULL, GUI_display_parameters_finish };
+
+static void GUI_display_address_line_finish(void);
+MenuDef AddressLineFinishMenuVar = { MENU_INDEX_ADDRESS_LINE_FINISH, 1, &AddressMenu[0], NULL, GUI_display_address_line_finish };
+
+static void GUI_display_address_relay_finish(void);
+MenuDef AddressRelayFinishMenuVar = { MENU_INDEX_ADDRESS_RELAY_FINISH, 1, &AddressMenu[1], NULL, GUI_display_address_relay_finish };
+
+
+static void GUI_display_colour_all(void);
+static void GUI_display_colour_ch(void);
+#if MENU_EXTRA_EN > 0
+static void GUI_display_extra(void);
+#endif
+MenuDef ColourMenu[COLOUR_MENU_SIZE] = { 
+	{ MENU_INDEX_COLOUR_ALL,   4, &MainMenu[2], NULL, GUI_display_colour_all },
+	{ MENU_INDEX_COLOUR_CH,  512, &MainMenu[2], NULL, GUI_display_colour_ch },
+#if MENU_EXTRA_EN > 0
+  { MENU_INDEX_EXTRA,        4, &MainMenu[2], &ExtraFinishMenuVar, GUI_display_extra },
+#endif
+};
+
+#if MENU_EXTRA_EN > 0
+static void GUI_display_extra_finish(void);
+MenuDef ExtraFinishMenuVar = { MENU_INDEX_EXTRA_FINISH, 1, &ColourMenu[COLOUR_MENU_SIZE-1], NULL, GUI_display_extra_finish };
+#endif
+
+static void GUI_display_colour_change_3(void);
+static void GUI_display_colour_change_4(void);
+static void GUI_display_colour_rotation_3(void);
+static void GUI_display_colour_rotation_4(void);
+static void GUI_display_colour_rotation_ch(void);
+static void GUI_display_colour_change_1(void);
+MenuDef PatternMenu[6] = { 
+	{ MENU_INDEX_COLOUR_CHANGE_3,    4, &MainMenu[3], NULL, GUI_display_colour_change_3 },
+	{ MENU_INDEX_COLOUR_CHANGE_4,    4, &MainMenu[3], NULL, GUI_display_colour_change_4 },
+	{ MENU_INDEX_COLOUR_ROTATION_3,  4, &MainMenu[3], NULL, GUI_display_colour_rotation_3 },
+	{ MENU_INDEX_COLOUR_ROTATION_4,  4, &MainMenu[3], NULL, GUI_display_colour_rotation_4 },
+	{ MENU_INDEX_COLOUR_ROTATION_CH, 4, &MainMenu[3], NULL, GUI_display_colour_rotation_ch },
+	{ MENU_INDEX_COLOUR_CHANGE_1,    4, &MainMenu[3], NULL, GUI_display_colour_change_1 },
+};
+
+
+//阴码 逆向 列行式
+const u8 she[] = { //设
+	0x40,0x40,0x42,0xCC,0x00,0x40,0xA0,0x9E,0x82,0x82,0x82,0x9E,0xA0,0x20,0x20,0x00,
+	0x00,0x00,0x00,0x3F,0x90,0x88,0x40,0x43,0x2C,0x10,0x28,0x46,0x41,0x80,0x80,0x00
+};
+const u8 zhi[] = { //置
+	0x00,0x17,0x15,0xD5,0x55,0x57,0x55,0x7D,0x55,0x57,0x55,0xD5,0x15,0x17,0x00,0x00,
+	0x40,0x40,0x40,0x7F,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x7F,0x40,0x40,0x40,0x00
+};
+const u8 di[] = {  //地
+	0x20,0x20,0x20,0xFF,0x20,0x20,0x80,0xF8,0x80,0x40,0xFF,0x20,0x10,0xF0,0x00,0x00,
+	0x10,0x30,0x10,0x0F,0x08,0x08,0x00,0x3F,0x40,0x40,0x5F,0x42,0x44,0x43,0x78,0x00
+};
+const u8 zhi1[] = {//址
+	0x20,0x20,0x20,0xFF,0x20,0x20,0x00,0xF8,0x00,0x00,0xFF,0x40,0x40,0x40,0x00,0x00,
+	0x10,0x30,0x10,0x0F,0x08,0x48,0x40,0x7F,0x40,0x40,0x7F,0x40,0x40,0x40,0x40,0x00
+};
+const u8 can[] = { //参
+	0x00,0x20,0x20,0xA8,0x6C,0x2A,0x39,0x28,0xA8,0x2A,0x6C,0xA8,0x20,0x20,0x00,0x00,
+	0x02,0x82,0x81,0x90,0x92,0x4A,0x49,0x45,0x24,0x22,0x10,0x08,0x01,0x02,0x02,0x00
+};
+const u8 shu[] = { //数
+	0x90,0x52,0x34,0x10,0xFF,0x10,0x34,0x52,0x80,0x70,0x8F,0x08,0x08,0xF8,0x08,0x00,
+	0x82,0x9A,0x56,0x63,0x22,0x52,0x8E,0x00,0x80,0x40,0x33,0x0C,0x33,0x40,0x80,0x00
+};
+const u8 tiao[] = {//调
+	0x40,0x42,0xCC,0x00,0x00,0xFE,0x82,0x92,0x92,0xFE,0x92,0x92,0x82,0xFE,0x00,0x00,
+	0x00,0x00,0x3F,0x10,0x88,0x7F,0x00,0x1E,0x12,0x12,0x12,0x5E,0x80,0x7F,0x00,0x00
+};
+const u8 jie[] = { //节
+	0x04,0x44,0x44,0x44,0x5F,0x44,0xC4,0x44,0x44,0x44,0x5F,0x44,0xC4,0x04,0x04,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0x08,0x10,0x08,0x07,0x00,0x00,0x00
+};
+const u8 yan[] = { //颜
+	0x00,0xE4,0x2C,0x35,0xA6,0x74,0x2C,0x24,0x02,0xF2,0x1A,0xD6,0x12,0xF2,0x02,0x00,
+	0x40,0x3F,0x80,0x89,0x44,0x22,0x11,0x08,0x80,0x4F,0x30,0x0F,0x10,0x2F,0xC0,0x00
+};
+const u8 se[] = {  //色
+	0x20,0x10,0xE8,0x24,0x27,0x24,0x24,0xE4,0x24,0x34,0x2C,0x20,0xE0,0x00,0x00,0x00,
+	0x00,0x00,0x3F,0x42,0x42,0x42,0x42,0x43,0x42,0x42,0x42,0x42,0x43,0x40,0x78,0x00
+};
+const u8 hua[] = { //花
+	0x04,0x04,0x04,0x84,0x6F,0x04,0x04,0x04,0xE4,0x04,0x8F,0x44,0x24,0x04,0x04,0x00,
+	0x04,0x02,0x01,0xFF,0x00,0x10,0x08,0x04,0x3F,0x41,0x40,0x40,0x40,0x40,0x78,0x00
+};
+const u8 yang[] = {//样
+	0x10,0x10,0xD0,0xFF,0x90,0x00,0x10,0x91,0x96,0x90,0xF0,0x90,0x94,0x93,0x10,0x00,
+	0x04,0x03,0x00,0xFF,0x00,0x01,0x04,0x04,0x04,0x04,0xFF,0x04,0x04,0x04,0x04,0x00
+};
+const u8 ce[] = {  //测
+	0x10,0x60,0x02,0x8C,0x00,0xFE,0x02,0xF2,0x02,0xFE,0x00,0xF8,0x00,0xFF,0x00,0x00,
+	0x04,0x04,0x7E,0x01,0x80,0x47,0x30,0x0F,0x10,0x27,0x00,0x47,0x80,0x7F,0x00,0x00
+};
+const u8 shi[] = { //试
+	0x40,0x40,0x42,0xCC,0x00,0x90,0x90,0x90,0x90,0x90,0xFF,0x10,0x11,0x16,0x10,0x00,
+	0x00,0x00,0x00,0x3F,0x10,0x28,0x60,0x3F,0x10,0x10,0x01,0x0E,0x30,0x40,0xF0,0x00
+};
+const u8 xi[] = {  //系
+	0x00,0x00,0x22,0x32,0x2A,0xA6,0xA2,0x62,0x21,0x11,0x09,0x81,0x01,0x00,0x00,0x00,
+	0x00,0x42,0x22,0x13,0x0B,0x42,0x82,0x7E,0x02,0x02,0x0A,0x12,0x23,0x46,0x00,0x00
+};
+const u8 tong[] = {//统
+	0x20,0x30,0xAC,0x63,0x30,0x00,0x88,0xC8,0xA8,0x99,0x8E,0x88,0xA8,0xC8,0x88,0x00,
+	0x22,0x67,0x22,0x12,0x12,0x80,0x40,0x30,0x0F,0x00,0x00,0x3F,0x40,0x40,0x71,0x00
+};
+const u8 guan[] = {//关
+	0x00,0x00,0x10,0x11,0x16,0x10,0x10,0xF0,0x10,0x10,0x14,0x13,0x10,0x00,0x00,0x00,
+	0x81,0x81,0x41,0x41,0x21,0x11,0x0D,0x03,0x0D,0x11,0x21,0x41,0x41,0x81,0x81,0x00
+};
+const u8 yu[] = {  //于
+	0x40,0x40,0x42,0x42,0x42,0x42,0x42,0xFE,0x42,0x42,0x42,0x42,0x42,0x40,0x40,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x40,0x80,0x7F,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+
+const u8 qi[] = {  //起
+	0x40,0x48,0x48,0x48,0xFF,0x48,0x48,0x00,0xC4,0x44,0x44,0x44,0xFC,0x00,0x00,0x00,
+	0x80,0x60,0x1F,0x20,0x7F,0x44,0x44,0x40,0x4F,0x50,0x50,0x50,0x50,0x5C,0x40,0x00
+};
+const u8 shi2[] = {//始
+	0x10,0x10,0xF0,0x1F,0x10,0xF0,0x00,0x40,0xE0,0x58,0x47,0x40,0x50,0x60,0xC0,0x00,
+	0x40,0x22,0x15,0x08,0x16,0x21,0x00,0x00,0xFE,0x42,0x42,0x42,0x42,0xFE,0x00,0x00
+};
+const u8 bian[] = {//编
+	0x20,0x30,0xAC,0x63,0x30,0x00,0xFC,0x24,0x25,0x26,0x24,0x24,0x24,0x3C,0x00,0x00,
+	0x22,0x67,0x22,0x12,0x52,0x38,0x07,0xFF,0x09,0x7F,0x09,0x3F,0x89,0xFF,0x00,0x00
+};
+const u8 hao[] = { //号
+	0x80,0x80,0x80,0xBE,0xA2,0xA2,0xA2,0xA2,0xA2,0xA2,0xA2,0xBE,0x80,0x80,0x80,0x00,
+	0x00,0x00,0x00,0x06,0x05,0x04,0x04,0x04,0x44,0x84,0x44,0x3C,0x00,0x00,0x00,0x00
+};
+const u8 tong1[]= {//通
+	0x40,0x42,0xCC,0x00,0x00,0xE2,0x22,0x2A,0x2A,0xF2,0x2A,0x26,0x22,0xE0,0x00,0x00,
+	0x80,0x40,0x3F,0x40,0x80,0xFF,0x89,0x89,0x89,0xBF,0x89,0xA9,0xC9,0xBF,0x80,0x00
+};
+const u8 dao[] = { //道
+	0x40,0x40,0x42,0xCC,0x00,0x08,0xE9,0xAA,0xB8,0xA8,0xA8,0xAA,0xE9,0x08,0x00,0x00,
+	0x00,0x40,0x20,0x1F,0x20,0x40,0x5F,0x4A,0x4A,0x4A,0x4A,0x4A,0x5F,0x40,0x40,0x00
+};
+
+const u8 lei[] = { //类
+	0x00,0x10,0x10,0x92,0x54,0x30,0x10,0xFF,0x10,0x30,0x54,0x92,0x10,0x10,0x00,0x00,
+	0x84,0x85,0x45,0x44,0x24,0x14,0x0C,0x06,0x0C,0x14,0x24,0x44,0x45,0x84,0x84,0x00
+};
+const u8 xing[] = {//型
+	0x20,0x22,0xA2,0x7E,0x22,0x22,0xFE,0x22,0x22,0x00,0x7C,0x00,0x00,0xFF,0x00,0x00,
+	0x44,0x42,0x49,0x48,0x48,0x48,0x49,0x7E,0x48,0x48,0x48,0x49,0x4A,0x41,0x40,0x00
+};
+const u8 hui[] = { //灰
+	0x08,0x08,0x08,0x88,0x78,0x0F,0x88,0x08,0xE8,0x08,0x08,0x08,0x08,0xC8,0x08,0x00,
+	0x10,0x88,0x86,0x41,0x44,0x22,0x11,0x0C,0x03,0x0C,0x10,0x22,0x41,0x80,0x80,0x00
+};
+const u8 du[] = {  //度
+	0x00,0x00,0xFC,0x24,0x24,0x24,0xFC,0x25,0x26,0x24,0xFC,0x24,0x24,0x24,0x04,0x00,
+	0x40,0x30,0x8F,0x80,0x84,0x4C,0x55,0x25,0x25,0x25,0x55,0x4C,0x80,0x80,0x80,0x00
+};
+const u8 shu1[] = {//输
+	0x88,0x68,0x1F,0xC8,0x08,0x10,0xC8,0x54,0x52,0xD1,0x12,0x94,0x08,0xD0,0x10,0x00,
+	0x09,0x19,0x09,0xFF,0x05,0x00,0xFF,0x12,0x92,0xFF,0x00,0x5F,0x80,0x7F,0x00,0x00
+};
+const u8 chu[] = { //出
+	0x00,0x00,0x7C,0x40,0x40,0x40,0x40,0xFF,0x40,0x40,0x40,0x40,0xFC,0x00,0x00,0x00,
+	0x00,0x7C,0x40,0x40,0x40,0x40,0x40,0x7F,0x40,0x40,0x40,0x40,0x40,0xFC,0x00,0x00
+};
+const u8 bo[] = {  //波
+	0x10,0x60,0x02,0x0C,0xC0,0x00,0xF8,0x88,0x88,0x88,0xFF,0x88,0x88,0xA8,0x18,0x00,
+	0x04,0x04,0x7C,0x03,0x80,0x60,0x1F,0x80,0x43,0x2C,0x10,0x28,0x46,0x81,0x80,0x00
+};
+const u8 te[] = {  //特
+	0x40,0x3C,0x10,0xFF,0x10,0x10,0x40,0x48,0x48,0x48,0x7F,0x48,0xC8,0x48,0x40,0x00,
+	0x02,0x06,0x02,0xFF,0x01,0x01,0x00,0x02,0x0A,0x12,0x42,0x82,0x7F,0x02,0x02,0x00
+};
+const u8 lv[] = {  //率
+	0x00,0x14,0xA4,0x44,0x24,0x34,0xAD,0x66,0x24,0x94,0x04,0x44,0xA4,0x14,0x00,0x00,
+	0x08,0x09,0x08,0x08,0x09,0x09,0x09,0xFD,0x09,0x09,0x0B,0x08,0x08,0x09,0x08,0x00
+};
+const u8 ji1[] = { //极
+	0x10,0x10,0xD0,0xFF,0x90,0x10,0x02,0x02,0xFE,0x02,0x02,0x62,0x5A,0xC6,0x00,0x00,
+	0x04,0x03,0x00,0xFF,0x00,0x43,0x30,0x8F,0x80,0x43,0x2C,0x10,0x2C,0x43,0x80,0x00
+};
+const u8 xing1[]= {//性
+	0x00,0xE0,0x00,0xFF,0x10,0x20,0x40,0x3C,0x10,0x10,0xFF,0x10,0x10,0x10,0x00,0x00,
+	0x01,0x00,0x00,0xFF,0x00,0x00,0x40,0x42,0x42,0x42,0x7F,0x42,0x42,0x42,0x40,0x00
+};
+const u8 zi[] = {  //自
+	0x00,0x00,0x00,0xF8,0x88,0x8C,0x8A,0x89,0x88,0x88,0x88,0xF8,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0xFF,0x44,0x44,0x44,0x44,0x44,0x44,0x44,0xFF,0x00,0x00,0x00,0x00
+};
+const u8 jian1[]= {//检
+	0x10,0x10,0xD0,0xFF,0x90,0x50,0x20,0x50,0x4C,0x43,0x4C,0x50,0x20,0x40,0x40,0x00,
+	0x04,0x03,0x00,0xFF,0x00,0x41,0x44,0x58,0x41,0x4E,0x60,0x58,0x47,0x40,0x40,0x00
+};
+const u8 guan1[]= {//关
+	0x00,0x00,0x10,0x11,0x16,0x10,0x10,0xF0,0x10,0x10,0x14,0x13,0x10,0x00,0x00,0x00,
+	0x81,0x81,0x41,0x41,0x21,0x11,0x0D,0x03,0x0D,0x11,0x21,0x41,0x41,0x81,0x81,0x00
+};
+const u8 bi[] = {  //闭
+	0x00,0xF8,0x01,0x22,0x20,0x22,0x22,0xA2,0xFA,0x22,0x22,0x22,0x02,0xFE,0x00,0x00,
+	0x00,0xFF,0x00,0x08,0x04,0x02,0x11,0x20,0x1F,0x00,0x00,0x40,0x80,0x7F,0x00,0x00
+};
+const u8 bing[] = {//并
+	0x00,0x10,0x10,0x11,0xF6,0x10,0x10,0x10,0x10,0x10,0xF4,0x13,0x10,0x10,0x00,0x00,
+	0x02,0x82,0x42,0x32,0x0F,0x02,0x02,0x02,0x02,0x02,0xFF,0x02,0x02,0x02,0x02,0x00
+};
+const u8 lian[] = {//联
+	0x02,0xFE,0x92,0x92,0xFE,0x02,0x00,0x10,0x11,0x16,0xF0,0x14,0x13,0x10,0x00,0x00,
+	0x10,0x1F,0x08,0x08,0xFF,0x04,0x81,0x41,0x31,0x0D,0x03,0x0D,0x31,0x41,0x81,0x00
+};
+const u8 dan[] = { //单
+	0x00,0x00,0xF8,0x49,0x4A,0x4C,0x48,0xF8,0x48,0x4C,0x4A,0x49,0xF8,0x00,0x00,0x00,
+	0x10,0x10,0x13,0x12,0x12,0x12,0x12,0xFF,0x12,0x12,0x12,0x12,0x13,0x10,0x10,0x00
+};
+const u8 shuang[]={//双
+	0x04,0x34,0xC4,0x04,0xC4,0x3C,0x00,0x04,0xFC,0x04,0x04,0x04,0xC4,0x3C,0x00,0x00,
+	0x40,0x30,0x0C,0x03,0x0C,0x30,0x80,0x40,0x20,0x13,0x0C,0x13,0x20,0x40,0x80,0x00
+};
+const u8 yi[] = {  //一
+	0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+const u8 er[] = {  //二
+	0x00,0x00,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x00,0x00,0x00,
+	0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x00
+};
+const u8 san[] = { //三
+	0x00,0x04,0x84,0x84,0x84,0x84,0x84,0x84,0x84,0x84,0x84,0x84,0x84,0x04,0x00,0x00,
+	0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x00
+};
+const u8 si[] = {  //四
+	0x00,0xFC,0x04,0x04,0x04,0xFC,0x04,0x04,0x04,0xFC,0x04,0x04,0x04,0xFC,0x00,0x00,
+	0x00,0x7F,0x28,0x24,0x23,0x20,0x20,0x20,0x20,0x21,0x22,0x22,0x22,0x7F,0x00,0x00
+};
+const u8 shi3[] = {//适
+	0x40,0x40,0x42,0xCC,0x00,0x10,0x92,0x92,0x92,0xFF,0x91,0x91,0x91,0x10,0x10,0x00,
+	0x00,0x40,0x20,0x1F,0x20,0x40,0x5F,0x48,0x48,0x48,0x48,0x48,0x5F,0x40,0x40,0x00
+};
+const u8 ying1[]= {//应
+	0x00,0x00,0xFC,0x04,0x44,0x84,0x04,0x25,0xC6,0x04,0x04,0x04,0x04,0xE4,0x04,0x00,
+	0x40,0x30,0x0F,0x40,0x40,0x41,0x4E,0x40,0x40,0x63,0x50,0x4C,0x43,0x40,0x40,0x00
+};
+const u8 gao[] = { //高
+	0x04,0x04,0x04,0x04,0xF4,0x94,0x95,0x96,0x94,0x94,0xF4,0x04,0x04,0x04,0x04,0x00,
+	0x00,0xFE,0x02,0x02,0x7A,0x4A,0x4A,0x4A,0x4A,0x4A,0x7A,0x02,0x82,0xFE,0x00,0x00
+};
+const u8 di1[] = { //低
+	0x00,0x80,0x60,0xF8,0x07,0x00,0xFC,0x84,0x84,0x84,0xFE,0x82,0x83,0x82,0x80,0x00,
+	0x01,0x00,0x00,0xFF,0x00,0x00,0xFF,0x40,0x20,0x00,0x41,0x8E,0x30,0x40,0xF8,0x00
+};
+const u8 you[] = { //有
+	0x04,0x04,0x04,0x84,0xE4,0x3C,0x27,0x24,0x24,0x24,0x24,0xE4,0x04,0x04,0x04,0x00,
+	0x04,0x02,0x01,0x00,0xFF,0x09,0x09,0x09,0x09,0x49,0x89,0x7F,0x00,0x00,0x00,0x00
+};
+const u8 xiao[] = {//效
+	0x88,0x48,0x28,0x09,0x0A,0x28,0x48,0x88,0x80,0x70,0x8F,0x08,0x08,0xF8,0x08,0x00,
+	0x40,0x20,0x11,0x0A,0x04,0x0B,0x30,0x80,0x40,0x20,0x13,0x0C,0x33,0x40,0x80,0x00
+};
+const u8 hong[] = {//红
+	0x20,0x30,0xAC,0x63,0x20,0x18,0x00,0x04,0x04,0x04,0xFC,0x04,0x04,0x04,0x00,0x00,
+	0x22,0x67,0x22,0x12,0x12,0x12,0x40,0x40,0x40,0x40,0x7F,0x40,0x40,0x40,0x40,0x00
+};
+const u8 lv1[] = { //绿
+	0x20,0x30,0xAC,0x63,0x30,0x00,0x80,0x92,0x92,0x92,0x92,0x92,0xFE,0x80,0x80,0x00,
+	0x22,0x67,0x22,0x12,0x12,0x00,0x22,0x14,0x48,0x84,0x7F,0x04,0x08,0x14,0x22,0x00
+};
+const u8 lan[] = { //蓝
+	0x04,0x04,0xE4,0x04,0x0F,0xF4,0x04,0x04,0xF4,0x44,0xCF,0x44,0x44,0x44,0x04,0x00,
+	0x40,0x40,0x7D,0x44,0x44,0x7D,0x44,0x45,0x44,0x7C,0x44,0x45,0x7C,0x40,0x40,0x00
+};
+const u8 chang[] = {//常
+	0x20,0x18,0x08,0xEA,0xAC,0xA8,0xA8,0xAF,0xA8,0xA8,0xAC,0xEA,0x08,0x28,0x18,0x00,
+	0x00,0x00,0x3E,0x02,0x02,0x02,0x02,0xFF,0x02,0x02,0x12,0x22,0x1E,0x00,0x00,0x00
+};
+const u8 liang[] = {//亮
+	0x00,0x04,0x04,0x74,0x54,0x54,0x55,0x56,0x54,0x54,0x54,0x74,0x04,0x04,0x00,0x00,
+	0x84,0x83,0x41,0x21,0x1D,0x05,0x05,0x05,0x05,0x05,0x7D,0x81,0x81,0x85,0xE3,0x00
+};
+const u8 suo[] = {//所
+	0x00,0x00,0xFC,0x24,0x24,0x22,0xE3,0x02,0xFC,0x44,0x44,0x42,0xC3,0x42,0x40,0x00,
+	0x40,0x30,0x0F,0x02,0x02,0x82,0x43,0x30,0x0F,0x00,0x00,0x00,0xFF,0x00,0x00,0x00
+};
+const u8 qi1[] = {//七
+	0x80,0x80,0x80,0x80,0x80,0x40,0xFF,0x40,0x40,0x40,0x20,0x20,0x20,0x20,0x00,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x3F,0x40,0x40,0x40,0x40,0x40,0x40,0x78,0x00,0x00
+};
+const u8 cai[] = {//彩
+	0x00,0x14,0x64,0x04,0x0C,0xB2,0x02,0x23,0x1A,0x00,0x20,0x10,0x08,0x86,0x60,0x00,
+	0x40,0x21,0x11,0x0D,0x03,0xFF,0x05,0x09,0x11,0x80,0x84,0x42,0x21,0x10,0x0C,0x00
+};
+const u8 jian2[] = {//渐
+	0x20,0xC2,0x0C,0x80,0x08,0xC8,0xB8,0xCF,0x88,0x88,0x00,0xFC,0x44,0xC4,0x42,0x00,
+	0x04,0x04,0x7E,0x01,0x08,0x18,0x08,0xFF,0x04,0x84,0x60,0x1F,0x00,0xFF,0x00,0x00
+};
+const u8 bian1[] = {//变
+	0x04,0x44,0x24,0x14,0x04,0x7C,0x05,0x06,0x04,0x7C,0x04,0x14,0x24,0x44,0x04,0x00,
+	0x80,0x80,0x81,0x41,0x43,0x25,0x29,0x11,0x29,0x25,0x43,0x41,0x80,0x80,0x80,0x00
+};
+const u8 kuai[] = {//快
+	0x00,0xE0,0x00,0xFF,0x10,0x20,0x08,0x08,0x08,0xFF,0x08,0x08,0xF8,0x00,0x00,0x00,
+	0x01,0x00,0x00,0xFF,0x00,0x81,0x41,0x31,0x0D,0x03,0x0D,0x31,0x41,0x81,0x81,0x00
+};
+const u8 man[] = {//慢
+	0xF0,0x00,0xFF,0x08,0x10,0xC0,0x5F,0x55,0xD5,0x55,0xD5,0x55,0x5F,0xC0,0x00,0x00,
+	0x00,0x00,0xFF,0x00,0x80,0x83,0x4A,0x5A,0x2B,0x2A,0x2B,0x5A,0x4A,0x83,0x80,0x00
+};
+const u8 su[] = {//速
+	0x40,0x40,0x42,0xCC,0x00,0x04,0xF4,0x94,0x94,0xFF,0x94,0x94,0xF4,0x04,0x00,0x00,
+	0x00,0x40,0x20,0x1F,0x20,0x48,0x44,0x42,0x41,0x5F,0x41,0x42,0x44,0x48,0x40,0x00
+};
+const u8 shan[] = {//闪
+	0x00,0xF8,0x01,0x02,0x00,0x02,0x02,0xF2,0x02,0x02,0x02,0x02,0x02,0xFE,0x00,0x00,
+	0x00,0xFF,0x00,0x00,0x08,0x04,0x03,0x00,0x01,0x02,0x0C,0x40,0x80,0x7F,0x00,0x00
+};
+const u8 shuo[] = {//烁
+	0x80,0x70,0x00,0xFF,0x20,0x10,0x00,0xFC,0x84,0x84,0xF4,0x82,0x83,0x82,0x80,0x00,
+	0x80,0x60,0x18,0x07,0x08,0x30,0x20,0x10,0x4C,0x80,0x7F,0x00,0x04,0x08,0x30,0x00
+};
+const u8 du1[] = {//℃
+	0x06,0x09,0x09,0xE6,0xF8,0x0C,0x04,0x02,0x02,0x02,0x02,0x02,0x04,0x1E,0x00,0x00,
+	0x00,0x00,0x00,0x07,0x1F,0x30,0x20,0x40,0x40,0x40,0x40,0x40,0x20,0x10,0x00,0x00
+};
+
+const u8 zheng[] = {//整
+	0x04,0x74,0xD4,0x54,0xFF,0x54,0xD4,0x74,0x14,0x08,0x77,0x84,0x44,0x3C,0x04,0x00,
+	0x82,0x89,0x88,0xE8,0x8B,0x88,0x88,0xF9,0xA8,0xAA,0xA9,0xA8,0xA9,0x8A,0x82,0x00
+};
+const u8 ti[] = {//体
+	0x00,0x80,0x60,0xF8,0x07,0x10,0x10,0x10,0xD0,0xFF,0xD0,0x10,0x10,0x10,0x00,0x00,
+	0x01,0x00,0x00,0xFF,0x10,0x08,0x04,0x0B,0x08,0xFF,0x08,0x0B,0x04,0x08,0x10,0x00
+};
+
+const u8 yu1[] = { //语
+	0x40,0x42,0xCC,0x00,0x00,0x82,0x92,0x92,0xF2,0x9E,0x92,0x92,0xF2,0x82,0x80,0x00,
+	0x00,0x00,0x7F,0x20,0x10,0x00,0xFC,0x44,0x44,0x44,0x44,0x44,0xFC,0x00,0x00,0x00
+};
+const u8 yan1[] = {//言
+	0x04,0x04,0x24,0x24,0x24,0x24,0x25,0x26,0x24,0x24,0x24,0x24,0x24,0x04,0x04,0x00,
+	0x00,0x00,0xF9,0x49,0x49,0x49,0x49,0x49,0x49,0x49,0x49,0x49,0xF9,0x00,0x00,0x00
+};
+const u8 zhong[]= {//中
+	0x00,0x00,0xF0,0x10,0x10,0x10,0x10,0xFF,0x10,0x10,0x10,0x10,0xF0,0x00,0x00,0x00,
+	0x00,0x00,0x0F,0x04,0x04,0x04,0x04,0xFF,0x04,0x04,0x04,0x04,0x0F,0x00,0x00,0x00
+};
+const u8 wen[] = { //文
+	0x08,0x08,0x08,0x38,0xC8,0x08,0x09,0x0E,0x08,0x08,0xC8,0x38,0x08,0x08,0x08,0x00,
+	0x80,0x80,0x40,0x40,0x20,0x11,0x0A,0x04,0x0A,0x11,0x20,0x40,0x40,0x80,0x80,0x00
+};
+
+const u8 mo[] = {  //模
+	0x10,0x10,0xD0,0xFF,0x90,0x14,0xE4,0xAF,0xA4,0xA4,0xA4,0xAF,0xE4,0x04,0x00,0x00,
+	0x04,0x03,0x00,0xFF,0x00,0x89,0x4B,0x2A,0x1A,0x0E,0x1A,0x2A,0x4B,0x88,0x80,0x00
+};
+const u8 shi1[] = {//式
+	0x10,0x10,0x90,0x90,0x90,0x90,0x90,0x10,0x10,0xFF,0x10,0x10,0x11,0x16,0x10,0x00,
+	0x00,0x20,0x60,0x20,0x3F,0x10,0x10,0x10,0x00,0x03,0x0C,0x10,0x20,0x40,0xF8,0x00
+};
+const u8 wu[] = {  //无
+	0x00,0x40,0x42,0x42,0x42,0xC2,0x7E,0x42,0xC2,0x42,0x42,0x42,0x40,0x40,0x00,0x00,
+	0x80,0x40,0x20,0x10,0x0C,0x03,0x00,0x00,0x3F,0x40,0x40,0x40,0x40,0x70,0x00,0x00
+};
+const u8 xian[] = {//线
+	0x20,0x30,0xAC,0x63,0x20,0x18,0x80,0x90,0x90,0xFF,0x90,0x49,0x4A,0x48,0x40,0x00,
+	0x22,0x67,0x22,0x12,0x12,0x12,0x40,0x40,0x20,0x13,0x0C,0x14,0x22,0x41,0xF8,0x00
+};
+const u8 zhu[] = { //主
+	0x00,0x08,0x08,0x08,0x08,0x08,0x09,0xFA,0x08,0x08,0x08,0x08,0x08,0x08,0x00,0x00,
+	0x40,0x40,0x41,0x41,0x41,0x41,0x41,0x7F,0x41,0x41,0x41,0x41,0x41,0x40,0x40,0x00
+};
+const u8 cong[] = {//从
+	0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,
+	0x80,0x40,0x30,0x0E,0x01,0x82,0x4C,0x20,0x18,0x07,0x00,0x07,0x18,0x60,0x80,0x00
+};
+const u8 ji[] = {  //机
+	0x10,0x10,0xD0,0xFF,0x90,0x10,0x00,0xFE,0x02,0x02,0x02,0xFE,0x00,0x00,0x00,0x00,
+	0x04,0x03,0x00,0xFF,0x00,0x83,0x60,0x1F,0x00,0x00,0x00,0x3F,0x40,0x40,0x78,0x00
+};
+const u8 xie[] = {//协
+	0x10,0x10,0xFF,0x10,0x10,0x00,0x90,0x10,0xFF,0x10,0x10,0xF0,0x80,0x00,0x00,0x00,
+	0x00,0x00,0xFF,0x00,0x04,0x82,0x41,0x30,0x0F,0x40,0x80,0x7F,0x00,0x01,0x06,0x00
+};
+const u8 yi1[] = {  //议
+	0x40,0x40,0x42,0xCC,0x00,0x00,0x1C,0xE0,0x01,0x06,0x00,0xE0,0x1E,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x3F,0x90,0x88,0x40,0x20,0x13,0x0C,0x13,0x20,0x40,0x80,0x80,0x00
+};
+
+const u8 ruan[] = {//软
+	0x08,0xC8,0xB8,0x8F,0xE8,0x88,0x88,0x40,0x30,0x0F,0xC8,0x08,0x28,0x18,0x00,0x00,
+	0x08,0x18,0x08,0x08,0xFF,0x04,0x84,0x40,0x30,0x0E,0x01,0x0E,0x30,0x40,0x80,0x00
+};
+const u8 ying[] = {//硬
+	0x04,0x84,0xE4,0x5C,0x44,0xC4,0x00,0xF2,0x92,0x92,0xFE,0x92,0x92,0xF2,0x02,0x00,
+	0x02,0x01,0x7F,0x10,0x10,0x3F,0x80,0x8F,0x54,0x24,0x5F,0x44,0x84,0x87,0x80,0x00
+};
+const u8 jian[] = {//件
+	0x00,0x80,0x60,0xF8,0x07,0x80,0x60,0x1C,0x10,0x10,0xFF,0x10,0x10,0x10,0x00,0x00,
+	0x01,0x00,0x00,0xFF,0x00,0x02,0x02,0x02,0x02,0x02,0xFF,0x02,0x02,0x02,0x02,0x00
+};
+const u8 ban[] = { //版
+	0x00,0xFE,0x20,0x20,0x3F,0x20,0x00,0xFC,0x24,0xE4,0x24,0x22,0x23,0xE2,0x00,0x00,
+	0x80,0x7F,0x01,0x01,0xFF,0x80,0x60,0x1F,0x80,0x41,0x26,0x18,0x26,0x41,0x80,0x00
+};
+const u8 ben[] = { //本
+	0x00,0x10,0x10,0x10,0x10,0xD0,0x30,0xFF,0x30,0xD0,0x10,0x10,0x10,0x10,0x00,0x00,
+	0x10,0x08,0x04,0x02,0x09,0x08,0x08,0xFF,0x08,0x08,0x09,0x02,0x04,0x08,0x10,0x00
+};
+const u8 dian[] = { //电
+	0x00,0x00,0xF8,0x88,0x88,0x88,0x88,0xFF,0x88,0x88,0x88,0x88,0xF8,0x00,0x00,0x00,
+	0x00,0x00,0x1F,0x08,0x08,0x08,0x08,0x7F,0x88,0x88,0x88,0x88,0x9F,0x80,0xF0,0x00
+};
+const u8 ya[] = { //压
+	0x00,0x00,0xFE,0x02,0x82,0x82,0x82,0x82,0xFA,0x82,0x82,0x82,0x82,0x82,0x02,0x00,
+	0x80,0x60,0x1F,0x40,0x40,0x40,0x40,0x40,0x7F,0x40,0x40,0x44,0x58,0x40,0x40,0x00
+};
+const u8 zheng1[] = {//正
+	0x00,0x02,0x02,0xC2,0x02,0x02,0x02,0xFE,0x82,0x82,0x82,0x82,0x82,0x02,0x00,0x00,
+	0x40,0x40,0x40,0x7F,0x40,0x40,0x40,0x7F,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x00
+};
+const u8 zai[] = {//在
+	0x08,0x08,0x88,0xC8,0x38,0x0C,0x0B,0x08,0x08,0xE8,0x08,0x08,0x08,0x08,0x08,0x00,
+	0x02,0x01,0x00,0xFF,0x40,0x41,0x41,0x41,0x41,0x7F,0x41,0x41,0x41,0x41,0x40,0x00
+};
+const u8 fa[] = {//发
+	0x00,0x00,0x18,0x16,0x10,0xD0,0xB8,0x97,0x90,0x90,0x90,0x92,0x94,0x10,0x00,0x00,
+	0x00,0x20,0x10,0x8C,0x83,0x80,0x41,0x46,0x28,0x10,0x28,0x44,0x43,0x80,0x80,0x00
+};
+const u8 song[] = {//送
+	0x40,0x40,0x42,0xCC,0x00,0x88,0x89,0x8E,0x88,0xF8,0x88,0x8C,0x8B,0x88,0x80,0x00,
+	0x00,0x40,0x20,0x1F,0x20,0x40,0x50,0x48,0x46,0x41,0x42,0x44,0x58,0x40,0x40,0x00
+};
+const u8 liu[] = {//流
+	0x10,0x60,0x02,0x8C,0x00,0x44,0x64,0x54,0x4D,0x46,0x44,0x54,0x64,0xC4,0x04,0x00,
+	0x04,0x04,0x7E,0x01,0x80,0x40,0x3E,0x00,0x00,0xFE,0x00,0x00,0x7E,0x80,0xE0,0x00
+};
+const u8 shui[] = {//水
+	0x00,0x20,0x20,0x20,0xA0,0x60,0x00,0xFF,0x60,0x80,0x40,0x20,0x18,0x00,0x00,0x00,
+	0x20,0x10,0x08,0x06,0x01,0x40,0x80,0x7F,0x00,0x01,0x02,0x04,0x08,0x10,0x10,0x00
+};
+const u8 que[] = {//确
+	0x04,0x84,0xE4,0x5C,0x44,0xC4,0x20,0x10,0xE8,0x27,0x24,0xE4,0x34,0x2C,0xE0,0x00,
+	0x02,0x01,0x7F,0x10,0x10,0x3F,0x80,0x60,0x1F,0x09,0x09,0x3F,0x49,0x89,0x7F,0x00	
+};
+const u8 ren[] = {//认
+	0x40,0x40,0x42,0xCC,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x3F,0x90,0x48,0x20,0x18,0x07,0x00,0x07,0x18,0x20,0x40,0x80,0x00
+};
+const u8 tiao1[] = {//跳
+	0x00,0x3E,0x22,0xE2,0x22,0x3E,0x00,0x08,0x10,0xFF,0x00,0xFF,0xA0,0x10,0x08,0x00,
+	0x40,0x7E,0x40,0x3F,0x22,0x22,0x80,0x42,0x31,0x0F,0x00,0x7F,0x80,0x81,0xF2,0x00
+};
+const u8 ban1[] = {//半
+	0x00,0x00,0x42,0x44,0x58,0x40,0x40,0xFF,0x40,0x40,0x50,0x48,0x46,0x00,0x00,0x00,
+	0x04,0x04,0x04,0x04,0x04,0x04,0x04,0xFF,0x04,0x04,0x04,0x04,0x04,0x04,0x04,0x00
+};
+const u8 gong[] = {//功
+	0x08,0x08,0x08,0xF8,0x08,0x08,0x08,0x10,0x10,0xFF,0x10,0x10,0x10,0xF0,0x00,0x00,
+	0x10,0x30,0x10,0x1F,0x08,0x88,0x48,0x30,0x0E,0x01,0x40,0x80,0x40,0x3F,0x00,0x00
+};
+const u8 jiao[] = {//角
+	0x20,0x10,0xE8,0x24,0x27,0x24,0x24,0xE4,0x24,0x34,0x2C,0x20,0xE0,0x00,0x00,0x00,
+	0x80,0x60,0x1F,0x09,0x09,0x09,0x09,0x7F,0x09,0x09,0x49,0x89,0x7F,0x00,0x00,0x00
+};
+const u8 chui[] = {//垂
+	0x00,0x20,0x24,0x24,0xE4,0x24,0x24,0xFC,0x22,0x22,0xE2,0x23,0x22,0x20,0x00,0x00,
+	0x01,0x09,0x49,0x49,0x4F,0x49,0x49,0x7F,0x49,0x49,0x4F,0x49,0x49,0x09,0x01,0x00
+};
+const u8 zhi2[] = {//直
+	0x00,0x04,0x04,0xF4,0x94,0x94,0x94,0x9F,0x94,0x94,0x94,0xF4,0x04,0x04,0x00,0x00,
+	0x40,0x40,0x40,0x7F,0x4A,0x4A,0x4A,0x4A,0x4A,0x4A,0x4A,0x7F,0x40,0x40,0x40,0x00
+};
+const u8 ping[] = {//平
+	0x00,0x02,0x02,0x12,0x62,0x02,0x02,0xFE,0x02,0x02,0x42,0x32,0x02,0x02,0x00,0x00,
+	0x01,0x01,0x01,0x01,0x01,0x01,0x01,0xFF,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x00
+};
+const u8 fang[] = {//方
+	0x08,0x08,0x08,0x08,0x08,0xF8,0x89,0x8E,0x88,0x88,0x88,0x88,0x08,0x08,0x08,0x00,
+	0x00,0x80,0x40,0x20,0x18,0x07,0x00,0x00,0x40,0x80,0x40,0x3F,0x00,0x00,0x00,0x00
+};
+const u8 shi4[] = {//式
+	0x10,0x10,0x90,0x90,0x90,0x90,0x90,0x10,0x10,0xFF,0x10,0x10,0x11,0x16,0x10,0x00,
+	0x00,0x20,0x60,0x20,0x3F,0x10,0x10,0x10,0x00,0x03,0x0C,0x10,0x20,0x40,0xF8,0x00
+};
+const u8 ji2[] = {//继
+	0x20,0x30,0xAC,0x63,0x10,0x00,0xFE,0x48,0x50,0x40,0xFF,0x40,0x50,0x48,0x00,0x00,
+	0x22,0x67,0x22,0x12,0x12,0x00,0x7F,0x44,0x42,0x41,0x7F,0x41,0x42,0x44,0x40,0x00
+};
+const u8 qi3[] = {//器
+	0x80,0x80,0x9E,0x92,0x92,0x92,0x9E,0xE0,0x80,0x9E,0xB2,0xD2,0x92,0x9E,0x80,0x00,
+	0x08,0x08,0xF4,0x94,0x92,0x92,0xF1,0x00,0x01,0xF2,0x92,0x94,0x94,0xF8,0x08,0x00
+};
+
+
+u8 dmxbuf[64];
+
+#define   GAMMA_SIZE   77
+
+u8 gamma1_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x40, 0x80, 0x40, 0x00, 0x00, 0x01, 0x01, 0x02, 
+	0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06, 0x07, 0x07, 0x08, 0x08, 0x09, 0x09, 0x0A, 
+	0x0A, 0x0B, 0x0B, 0x0C, 0x0C, 0x0D, 0x0D, 0x0E, 0x0E, 0x0F, 0x0F, 0x10, 0x10, 0x11, 0x11, 0x12, 
+	0x12, 0x13, 0x13, 0x14, 0x14, 0x15, 0x15, 0x16, 0x16, 0x17, 0x17, 0x18, 0x18, 0x19, 0x19, 0x1A, 
+	0x1A, 0x1B, 0x1B, 0x1C, 0x1C, 0x1D, 0x1D, 0x1E, 0x1E, 0x1F, 0x1F, 0xB8, 0x3E,
+};
+u8 gamma2_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x40, 0xC0, 0x40, 0x20, 0x20, 0x21, 0x22, 0x22, 
+	0x22, 0x23, 0x24, 0x24, 0x24, 0x25, 0x26, 0x26, 0x26, 0x27, 0x28, 0x28, 0x28, 0x29, 0x2A, 0x2A, 
+	0x2A, 0x2B, 0x2C, 0x2C, 0x2C, 0x2D, 0x2E, 0x2E, 0x2E, 0x2F, 0x30, 0x30, 0x30, 0x31, 0x32, 0x32, 
+	0x32, 0x33, 0x34, 0x34, 0x34, 0x35, 0x36, 0x36, 0x36, 0x37, 0x38, 0x38, 0x38, 0x39, 0x3A, 0x3A, 
+	0x3A, 0x3B, 0x3C, 0x3C, 0x3C, 0x3D, 0x3E, 0x3E, 0x3E, 0x3F, 0x40, 0x0E, 0x8F,
+};
+u8 gamma3_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x00, 0x40, 0x40, 0x40, 0x41, 0x41, 0x42, 
+	0x43, 0x43, 0x44, 0x44, 0x44, 0x45, 0x45, 0x46, 0x47, 0x47, 0x48, 0x48, 0x48, 0x49, 0x49, 0x4A, 
+	0x4B, 0x4B, 0x4C, 0x4C, 0x4C, 0x4D, 0x4D, 0x4E, 0x4F, 0x4F, 0x50, 0x50, 0x50, 0x51, 0x51, 0x52, 
+	0x53, 0x53, 0x54, 0x54, 0x54, 0x55, 0x55, 0x56, 0x57, 0x57, 0x58, 0x58, 0x58, 0x59, 0x59, 0x5A, 
+	0x5B, 0x5B, 0x5C, 0x5C, 0x5C, 0x5D, 0x5D, 0x5E, 0x5F, 0x5F, 0x60, 0x3F, 0xB8,
+};
+u8 gamma4_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x40, 0x40, 0x60, 0x60, 0x61, 0x61, 0x62, 
+	0x63, 0x63, 0x64, 0x64, 0x64, 0x65, 0x65, 0x66, 0x67, 0x67, 0x68, 0x68, 0x68, 0x69, 0x69, 0x6A, 
+	0x6B, 0x6B, 0x6C, 0x6C, 0x6C, 0x6D, 0x6D, 0x6E, 0x6F, 0x6F, 0x70, 0x70, 0x70, 0x71, 0x71, 0x72, 
+	0x73, 0x73, 0x74, 0x74, 0x74, 0x75, 0x75, 0x76, 0x77, 0x77, 0x78, 0x78, 0x78, 0x79, 0x79, 0x7A, 
+	0x7B, 0x7B, 0x7C, 0x7C, 0x7C, 0x7D, 0x7D, 0x7E, 0x7F, 0x7F, 0x80, 0xB8, 0x15,
+};
+u8 gamma5_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x80, 0x40, 0x80, 0x80, 0x81, 0x81, 0x82, 
+	0x82, 0x83, 0x83, 0x84, 0x85, 0x85, 0x86, 0x86, 0x87, 0x87, 0x88, 0x88, 0x88, 0x89, 0x89, 0x8A, 
+	0x8A, 0x8B, 0x8B, 0x8C, 0x8D, 0x8D, 0x8E, 0x8E, 0x8F, 0x8F, 0x90, 0x90, 0x90, 0x91, 0x91, 0x92, 
+	0x92, 0x93, 0x93, 0x94, 0x95, 0x95, 0x96, 0x96, 0x97, 0x97, 0x98, 0x98, 0x98, 0x99, 0x99, 0x9A, 
+	0x9A, 0x9B, 0x9B, 0x9C, 0x9D, 0x9D, 0x9E, 0x9E, 0x9F, 0x9F, 0xA0, 0xA3, 0x34,
+};
+u8 gamma6_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0xC0, 0x40, 0xA0, 0xA0, 0xA1, 0xA1, 0xA2, 
+	0xA2, 0xA3, 0xA3, 0xA4, 0xA5, 0xA5, 0xA6, 0xA6, 0xA7, 0xA7, 0xA8, 0xA8, 0xA8, 0xA9, 0xA9, 0xAA, 
+	0xAA, 0xAB, 0xAB, 0xAC, 0xAD, 0xAD, 0xAE, 0xAE, 0xAF, 0xAF, 0xB0, 0xB0, 0xB0, 0xB1, 0xB1, 0xB2, 
+	0xB2, 0xB3, 0xB3, 0xB4, 0xB5, 0xB5, 0xB6, 0xB6, 0xB7, 0xB7, 0xB8, 0xB8, 0xB8, 0xB9, 0xB9, 0xBA, 
+	0xBA, 0xBB, 0xBB, 0xBC, 0xBD, 0xBD, 0xBE, 0xBE, 0xBF, 0xBF, 0xC0, 0xB5, 0x11,
+};
+u8 gamma7_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x42, 0x00, 0x40, 0xC0, 0xC0, 0xC1, 0xC1, 0xC2, 
+	0xC2, 0xC3, 0xC3, 0xC4, 0xC5, 0xC5, 0xC6, 0xC6, 0xC7, 0xC7, 0xC8, 0xC8, 0xC8, 0xC9, 0xC9, 0xCA, 
+	0xCA, 0xCB, 0xCB, 0xCC, 0xCD, 0xCD, 0xCE, 0xCE, 0xCF, 0xCF, 0xD0, 0xD0, 0xD0, 0xD1, 0xD1, 0xD2, 
+	0xD2, 0xD3, 0xD3, 0xD4, 0xD5, 0xD5, 0xD6, 0xD6, 0xD7, 0xD7, 0xD8, 0xD8, 0xD8, 0xD9, 0xD9, 0xDA, 
+	0xDA, 0xDB, 0xDB, 0xDC, 0xDD, 0xDD, 0xDE, 0xDE, 0xDF, 0xDF, 0xE0, 0x24, 0x2E,
+};
+u8 gamma8_1_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x42, 0x40, 0x40, 0xE0, 0xE0, 0xE1, 0xE1, 0xE2, 
+	0xE2, 0xE3, 0xE3, 0xE4, 0xE5, 0xE5, 0xE6, 0xE6, 0xE7, 0xE7, 0xE8, 0xE8, 0xE8, 0xE9, 0xE9, 0xEA, 
+	0xEA, 0xEB, 0xEB, 0xEC, 0xED, 0xED, 0xEE, 0xEE, 0xEF, 0xEF, 0xF0, 0xF0, 0xF0, 0xF1, 0xF1, 0xF2, 
+	0xF2, 0xF3, 0xF3, 0xF4, 0xF5, 0xF5, 0xF6, 0xF6, 0xF7, 0xF7, 0xF8, 0xF8, 0xF8, 0xF9, 0xF9, 0xFA, 
+	0xFA, 0xFB, 0xFB, 0xFC, 0xFD, 0xFD, 0xFE, 0xFE, 0xFF, 0xFF, 0xFF, 0xBD, 0x73,
+};
+
+u8 gamma1_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x40, 0x80, 0x40, 0x00, 0x00, 0x00, 0x01, 0x00, 
+	0x02, 0x00, 0x04, 0x00, 0x08, 0x00, 0x0C, 0x00, 0x12, 0x00, 0x19, 0x00, 0x21, 0x00, 0x2A, 0x00, 
+	0x35, 0x00, 0x42, 0x00, 0x4F, 0x00, 0x5E, 0x00, 0x6F, 0x00, 0x81, 0x00, 0x95, 0x00, 0xAA, 0x00, 
+	0xC1, 0x00, 0xD9, 0x00, 0xF3, 0x01, 0x0E, 0x01, 0x2B, 0x01, 0x4A, 0x01, 0x6A, 0x01, 0x8C, 0x01, 
+	0xB0, 0x01, 0xD5, 0x01, 0xFC, 0x02, 0x25, 0x02, 0x50, 0x02, 0x7C, 0x63, 0x29,
+};
+u8 gamma2_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x40, 0xC0, 0x40, 0x02, 0xAA, 0x02, 0xDA, 0x03, 
+	0x0B, 0x03, 0x3E, 0x03, 0x73, 0x03, 0xAA, 0x03, 0xE3, 0x04, 0x1D, 0x04, 0x5A, 0x04, 0x98, 0x04, 
+	0xD8, 0x05, 0x1A, 0x05, 0x5E, 0x05, 0xA3, 0x05, 0xEB, 0x06, 0x34, 0x06, 0x7F, 0x06, 0xCC, 0x07, 
+	0x1B, 0x07, 0x6C, 0x07, 0xBF, 0x08, 0x14, 0x08, 0x6B, 0x08, 0xC4, 0x09, 0x1E, 0x09, 0x7B, 0x09, 
+	0xDA, 0x0A, 0x3A, 0x0A, 0x9D, 0x0B, 0x02, 0x0B, 0x68, 0x0B, 0xD1, 0x59, 0xE7,
+};
+u8 gamma3_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x00, 0x40, 0x0C, 0x3B, 0x0C, 0xA8, 0x0D, 
+	0x17, 0x0D, 0x87, 0x0D, 0xFA, 0x0E, 0x6F, 0x0E, 0xE6, 0x0F, 0x5F, 0x0F, 0xDA, 0x10, 0x57, 0x10, 
+	0xD6, 0x11, 0x57, 0x11, 0xDA, 0x12, 0x5F, 0x12, 0xE7, 0x13, 0x70, 0x13, 0xFC, 0x14, 0x8A, 0x15, 
+	0x1A, 0x15, 0xAB, 0x16, 0x40, 0x16, 0xD6, 0x17, 0x6E, 0x18, 0x09, 0x18, 0xA5, 0x19, 0x44, 0x19, 
+	0xE5, 0x1A, 0x88, 0x1B, 0x2D, 0x1B, 0xD5, 0x1C, 0x7F, 0x1D, 0x2A, 0xDF, 0x74,
+};
+u8 gamma4_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x40, 0x40, 0x1D, 0xD8, 0x1E, 0x88, 0x1F, 
+	0x3B, 0x1F, 0xEF, 0x20, 0xA6, 0x21, 0x5F, 0x22, 0x1A, 0x22, 0xD8, 0x23, 0x97, 0x24, 0x59, 0x25, 
+	0x1D, 0x25, 0xE4, 0x26, 0xAC, 0x27, 0x77, 0x28, 0x44, 0x29, 0x13, 0x29, 0xE5, 0x2A, 0xB8, 0x2B, 
+	0x8F, 0x2C, 0x67, 0x2D, 0x41, 0x2E, 0x1E, 0x2E, 0xFD, 0x2F, 0xDF, 0x30, 0xC2, 0x31, 0xA8, 0x32, 
+	0x91, 0x33, 0x7B, 0x34, 0x68, 0x35, 0x57, 0x36, 0x49, 0x37, 0x3D, 0x94, 0x44,
+};
+u8 gamma5_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x80, 0x40, 0x38, 0x33, 0x39, 0x2B, 0x3A, 
+	0x26, 0x3B, 0x23, 0x3C, 0x22, 0x3D, 0x24, 0x3E, 0x28, 0x3F, 0x2F, 0x40, 0x37, 0x41, 0x42, 0x42, 
+	0x50, 0x43, 0x60, 0x44, 0x72, 0x45, 0x86, 0x46, 0x9D, 0x47, 0xB6, 0x48, 0xD2, 0x49, 0xF0, 0x4B, 
+	0x10, 0x4C, 0x33, 0x4D, 0x58, 0x4E, 0x80, 0x4F, 0xAA, 0x50, 0xD6, 0x52, 0x05, 0x53, 0x36, 0x54, 
+	0x69, 0x55, 0x9F, 0x56, 0xD8, 0x58, 0x12, 0x59, 0x4F, 0x5A, 0x8F, 0x04, 0x48,
+};
+u8 gamma6_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0xC0, 0x40, 0x5B, 0xD1, 0x5D, 0x15, 0x5E, 
+	0x5C, 0x5F, 0xA5, 0x60, 0xF1, 0x62, 0x3F, 0x63, 0x90, 0x64, 0xE3, 0x66, 0x38, 0x67, 0x90, 0x68, 
+	0xEA, 0x6A, 0x47, 0x6B, 0xA6, 0x6D, 0x08, 0x6E, 0x6C, 0x6F, 0xD3, 0x71, 0x3C, 0x72, 0xA8, 0x74, 
+	0x16, 0x75, 0x86, 0x76, 0xF9, 0x78, 0x6F, 0x79, 0xE7, 0x7B, 0x61, 0x7C, 0xDE, 0x7E, 0x5E, 0x7F, 
+	0xE0, 0x81, 0x64, 0x82, 0xEB, 0x84, 0x74, 0x86, 0x00, 0x87, 0x8F, 0xED, 0x99,
+};
+u8 gamma7_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x42, 0x00, 0x40, 0x89, 0x20, 0x8A, 0xB3, 0x8C, 
+	0x49, 0x8D, 0xE2, 0x8F, 0x7D, 0x91, 0x1A, 0x92, 0xBA, 0x94, 0x5D, 0x96, 0x02, 0x97, 0xAA, 0x99, 
+	0x54, 0x9B, 0x01, 0x9C, 0xB0, 0x9E, 0x62, 0xA0, 0x16, 0xA1, 0xCD, 0xA3, 0x87, 0xA5, 0x43, 0xA7, 
+	0x02, 0xA8, 0xC3, 0xAA, 0x86, 0xAC, 0x4D, 0xAE, 0x16, 0xAF, 0xE1, 0xB1, 0xAF, 0xB3, 0x80, 0xB5, 
+	0x53, 0xB7, 0x29, 0xB9, 0x01, 0xBA, 0xDC, 0xBC, 0xB9, 0xBE, 0x99, 0xDA, 0x1F,
+};
+u8 gamma8_2_2[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x42, 0x40, 0x40, 0xC0, 0x7C, 0xC2, 0x61, 0xC4, 
+	0x49, 0xC6, 0x33, 0xC8, 0x21, 0xCA, 0x10, 0xCC, 0x02, 0xCD, 0xF7, 0xCF, 0xEF, 0xD1, 0xE9, 0xD3, 
+	0xE6, 0xD5, 0xE5, 0xD7, 0xE7, 0xD9, 0xEB, 0xDB, 0xF2, 0xDD, 0xFC, 0xE0, 0x09, 0xE2, 0x18, 0xE4, 
+	0x29, 0xE6, 0x3E, 0xE8, 0x55, 0xEA, 0x6E, 0xEC, 0x8A, 0xEE, 0xA9, 0xF0, 0xCB, 0xF2, 0xEF, 0xF5, 
+	0x16, 0xF7, 0x3F, 0xF9, 0x6B, 0xFB, 0x9A, 0xFD, 0xCB, 0xFF, 0xFF, 0xE4, 0xF4,
+};
+
+u8 gamma1_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x40, 0x80, 0x40, 0x00, 0x00, 0x00, 0x01, 0x00, 
+	0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x03, 0x00, 
+	0x04, 0x00, 0x06, 0x00, 0x07, 0x00, 0x09, 0x00, 0x0B, 0x00, 0x0E, 0x00, 0x11, 0x00, 0x14, 0x00, 
+	0x18, 0x00, 0x1C, 0x00, 0x20, 0x00, 0x25, 0x00, 0x2B, 0x00, 0x31, 0x00, 0x37, 0x00, 0x3E, 0x00, 
+	0x46, 0x00, 0x4E, 0x00, 0x57, 0x00, 0x61, 0x00, 0x6B, 0x00, 0x76, 0xC0, 0x4F,
+};
+u8 gamma2_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x40, 0xC0, 0x40, 0x00, 0x82, 0x00, 0x8F, 0x00, 
+	0x9C, 0x00, 0xAA, 0x00, 0xB9, 0x00, 0xC9, 0x00, 0xD9, 0x00, 0xEB, 0x00, 0xFD, 0x01, 0x11, 0x01, 
+	0x25, 0x01, 0x3B, 0x01, 0x51, 0x01, 0x69, 0x01, 0x81, 0x01, 0x9B, 0x01, 0xB6, 0x01, 0xD1, 0x01, 
+	0xEF, 0x02, 0x0D, 0x02, 0x2C, 0x02, 0x4D, 0x02, 0x6F, 0x02, 0x92, 0x02, 0xB7, 0x02, 0xDC, 0x03, 
+	0x04, 0x03, 0x2C, 0x03, 0x56, 0x03, 0x82, 0x03, 0xAE, 0x03, 0xDD, 0xC3, 0xDD,
+};
+u8 gamma3_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x00, 0x40, 0x04, 0x0D, 0x04, 0x3E, 0x04, 
+	0x71, 0x04, 0xA5, 0x04, 0xDB, 0x05, 0x13, 0x05, 0x4C, 0x05, 0x87, 0x05, 0xC4, 0x06, 0x02, 0x06, 
+	0x42, 0x06, 0x84, 0x06, 0xC7, 0x07, 0x0D, 0x07, 0x54, 0x07, 0x9D, 0x07, 0xE8, 0x08, 0x35, 0x08, 
+	0x84, 0x08, 0xD4, 0x09, 0x27, 0x09, 0x7C, 0x09, 0xD2, 0x0A, 0x2B, 0x0A, 0x86, 0x0A, 0xE3, 0x0B, 
+	0x42, 0x0B, 0xA3, 0x0C, 0x06, 0x0C, 0x6C, 0x0C, 0xD3, 0x0D, 0x3D, 0xFF, 0xCE,
+};
+u8 gamma4_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x40, 0x40, 0x0D, 0xA9, 0x0E, 0x18, 0x0E, 
+	0x88, 0x0E, 0xFB, 0x0F, 0x71, 0x0F, 0xE9, 0x10, 0x63, 0x10, 0xDF, 0x11, 0x5E, 0x11, 0xE0, 0x12, 
+	0x64, 0x12, 0xEA, 0x13, 0x73, 0x13, 0xFF, 0x14, 0x8D, 0x15, 0x1E, 0x15, 0xB1, 0x16, 0x47, 0x16, 
+	0xE0, 0x17, 0x7B, 0x18, 0x1A, 0x18, 0xBB, 0x19, 0x5E, 0x1A, 0x05, 0x1A, 0xAE, 0x1B, 0x5A, 0x1C, 
+	0x09, 0x1C, 0xBB, 0x1D, 0x70, 0x1E, 0x28, 0x1E, 0xE3, 0x1F, 0xA0, 0x53, 0xFA,
+};
+u8 gamma5_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0x80, 0x40, 0x20, 0x61, 0x21, 0x25, 0x21, 
+	0xEC, 0x22, 0xB6, 0x23, 0x83, 0x24, 0x53, 0x25, 0x26, 0x25, 0xFD, 0x26, 0xD6, 0x27, 0xB3, 0x28, 
+	0x93, 0x29, 0x77, 0x2A, 0x5E, 0x2B, 0x48, 0x2C, 0x35, 0x2D, 0x26, 0x2E, 0x1A, 0x2F, 0x12, 0x30, 
+	0x0D, 0x31, 0x0B, 0x32, 0x0D, 0x33, 0x13, 0x34, 0x1C, 0x35, 0x28, 0x36, 0x38, 0x37, 0x4C, 0x38, 
+	0x63, 0x39, 0x7E, 0x3A, 0x9D, 0x3B, 0xC0, 0x3C, 0xE6, 0x3E, 0x10, 0x06, 0xCF,
+};
+u8 gamma6_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x41, 0xC0, 0x40, 0x3F, 0x3D, 0x40, 0x6F, 0x41, 
+	0xA4, 0x42, 0xDD, 0x44, 0x1A, 0x45, 0x5B, 0x46, 0xA0, 0x47, 0xE8, 0x49, 0x35, 0x4A, 0x86, 0x4B, 
+	0xDA, 0x4D, 0x33, 0x4E, 0x90, 0x4F, 0xF1, 0x51, 0x55, 0x52, 0xBE, 0x54, 0x2C, 0x55, 0x9D, 0x57, 
+	0x13, 0x58, 0x8C, 0x5A, 0x0A, 0x5B, 0x8D, 0x5D, 0x13, 0x5E, 0x9E, 0x60, 0x2E, 0x61, 0xC1, 0x63, 
+	0x59, 0x64, 0xF6, 0x66, 0x96, 0x68, 0x3C, 0x69, 0xE6, 0x6B, 0x94, 0x22, 0x61,
+};
+u8 gamma7_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x42, 0x00, 0x40, 0x6D, 0x47, 0x6E, 0xFE, 0x70, 
+	0xBA, 0x72, 0x7B, 0x74, 0x40, 0x76, 0x0A, 0x77, 0xD8, 0x79, 0xAB, 0x7B, 0x83, 0x7D, 0x60, 0x7F, 
+	0x41, 0x81, 0x27, 0x83, 0x12, 0x85, 0x02, 0x86, 0xF7, 0x88, 0xF1, 0x8A, 0xEF, 0x8C, 0xF3, 0x8E, 
+	0xFB, 0x91, 0x08, 0x93, 0x1B, 0x95, 0x32, 0x97, 0x4F, 0x99, 0x70, 0x9B, 0x97, 0x9D, 0xC3, 0x9F, 
+	0xF4, 0xA2, 0x2A, 0xA4, 0x65, 0xA6, 0xA5, 0xA8, 0xEB, 0xAB, 0x36, 0xAB, 0xAF,
+};
+u8 gamma8_3_0[GAMMA_SIZE] = {
+	0xAA, 0xFF, 0xFF, 0x59, 0x54, 0x44, 0x4D, 0x57, 0x42, 0x40, 0x40, 0xAD, 0x86, 0xAF, 0xDC, 0xB2, 
+	0x37, 0xB4, 0x97, 0xB6, 0xFD, 0xB9, 0x68, 0xBB, 0xD8, 0xBE, 0x4E, 0xC0, 0xCA, 0xC3, 0x4B, 0xC5, 
+	0xD1, 0xC8, 0x5D, 0xCA, 0xEF, 0xCD, 0x86, 0xD0, 0x23, 0xD2, 0xC5, 0xD5, 0x6D, 0xD8, 0x1B, 0xDA, 
+	0xCF, 0xDD, 0x88, 0xE0, 0x47, 0xE3, 0x0C, 0xE5, 0xD7, 0xE8, 0xA7, 0xEB, 0x7D, 0xEE, 0x59, 0xF1, 
+	0x3C, 0xF4, 0x24, 0xF7, 0x12, 0xFA, 0x06, 0xFD, 0x00, 0xFF, 0xFF, 0xFF, 0x92,
+};
+
+
+void crc16_1021(u8 *message, u8 len) 
+{ 
+	u8 i, j; 
+	u16 crc_reg = 0;     
+	u16 current; 
+	        
+	for (i=0; i<len; i++)     
+	{ 
+		current = message[i] << 8;      
+		   
+		for (j=0; j<8; j++)         
+		{ 
+			if ((short)(crc_reg ^ current) < 0)                 
+				crc_reg = (crc_reg << 1) ^ 0x1021;             
+			else 
+				crc_reg <<= 1;             
+			
+			current <<= 1;                    
+		} 
+	} 
+	
+	*(message+len) = HIGH(crc_reg);
+	*(message+len+1) = LOW(crc_reg);
+}
+
+void YT_send_flicker(void)
+{
+	u8 t;
+	u16 i; 	
+	
+	for (t=7; t!=0; t--)
+	{
+		SendUart3Byte(DMX_START_DAT);
+		for (i=0; i<1024; i++)
+			SendUart3Byte(0xFF);
+		OSTimeDly(16/OS_TICK);
+		
+		SendUart3Byte(DMX_START_DAT);
+		for (i=0; i<1024; i++)
+			SendUart3Byte(0x00);
+		OSTimeDly(16/OS_TICK);	
+	}
+}
+
+void YT_send_address_line(u16 num, u16 addr_interval, u16 addr)
+{
+	u8 t;
+	u16 i; 	
+	
+	u16 n;
+	
+	for (t=10; t!=0; t--)
+	{
+		SendUart3Byte(DMX_START_DAT);
+		for (i=0; i<1024; i++)
+			SendUart3Byte(0x00);
+		OSTimeDly(156/OS_TICK);	
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x56;
+	dmxbuf[12]= 0xAE;
+	dmxbuf[13]= 0xA7;
+	dmxbuf[14]= 0xAD;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(32/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFE;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x40;
+	dmxbuf[9] = 0x02;
+	dmxbuf[10]= 0x04;
+	dmxbuf[11]= HIGH(num);
+	dmxbuf[12]= LOW(num);
+	dmxbuf[13]= HIGH(addr);
+	dmxbuf[14]= LOW(addr);
+	crc16_1021(dmxbuf, 15);
+	
+	for (t=3; t!=0; t--)
+	{			
+		SendUart3DMX(dmxbuf, 17);
+		OSTimeDly(60/OS_TICK);			
+	}
+	
+	OSTimeDly(1000/OS_TICK);
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x51;
+	dmxbuf[8] = 0x00;
+	dmxbuf[9] = 0x00;
+	dmxbuf[10]= 0x00;
+	dmxbuf[11]= 0x26;
+	dmxbuf[12]= 0xC4;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 13);
+		OSTimeDly(64/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x00;
+	dmxbuf[12]= 0x00;
+	dmxbuf[13]= 0x57;
+	dmxbuf[14]= 0x90;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(16/OS_TICK);
+	}
+	
+	for (t=10; t!=0; t--)
+	{
+		SendUart3Byte(DMX_START_DAT);
+		for (i=0; i<1024; i++)
+			SendUart3Byte(0x00);
+		OSTimeDly(60/OS_TICK);	
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x56;
+	dmxbuf[12]= 0xAE;
+	dmxbuf[13]= 0xA7;
+	dmxbuf[14]= 0xAD;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(32/OS_TICK);
+	}
+	
+	//发送地址开始
+	for (n=1; n<512; n++)
+	{
+		dmxbuf[0] = DMX_START_SET;
+		dmxbuf[1] = HIGH(n);
+		dmxbuf[2] = LOW(n);
+		dmxbuf[3] = 0x59;
+		dmxbuf[4] = 0x54;
+		dmxbuf[5] = 0x44;
+		dmxbuf[6] = 0x4D;
+		dmxbuf[7] = 0x57;
+		dmxbuf[8] = 0x40;
+		dmxbuf[9] = 0x0A;
+		dmxbuf[10]= 0x01;
+		dmxbuf[11]= addr_interval;		
+		crc16_1021(dmxbuf, 12);
+		SendUart3DMX(dmxbuf, 14);
+		OSTimeDly(16/OS_TICK);	
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x00;
+	dmxbuf[12]= 0x00;
+	dmxbuf[13]= 0x57;
+	dmxbuf[14]= 0x90;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(16/OS_TICK);
+	}
+	
+	for (t=10; t!=0; t--)
+	{
+		SendUart3Byte(DMX_START_DAT);
+		for (i=0; i<1024; i++)
+			SendUart3Byte(0x00);
+		OSTimeDly(156/OS_TICK);	
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x56;
+	dmxbuf[12]= 0xAE;
+	dmxbuf[13]= 0xA7;
+	dmxbuf[14]= 0xAD;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(32/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFE;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x40;
+	dmxbuf[9] = 0x02;
+	dmxbuf[10]= 0x04;
+	dmxbuf[11]= HIGH(num);
+	dmxbuf[12]= LOW(num);
+	dmxbuf[13]= HIGH(addr);
+	dmxbuf[14]= LOW(addr);
+	crc16_1021(dmxbuf, 15);
+	
+	for (t=3; t!=0; t--)
+	{			
+		SendUart3DMX(dmxbuf, 17);
+		OSTimeDly(60/OS_TICK);			
+	}
+	
+	OSTimeDly(1000/OS_TICK);
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x51;
+	dmxbuf[8] = 0x00;
+	dmxbuf[9] = 0x00;
+	dmxbuf[10]= 0x00;
+	dmxbuf[11]= 0x26;
+	dmxbuf[12]= 0xC4;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 13);
+		OSTimeDly(64/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x00;
+	dmxbuf[12]= 0x00;
+	dmxbuf[13]= 0x57;
+	dmxbuf[14]= 0x90;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(16/OS_TICK);
+	}
+}
+
+void YT_send_address_start(void)
+{
+	u8 t;
+	
+	for (t=10; t!=0; t--)
+	{
+		dmxbuf[0] = 0x00;
+		SendUart3DMX(dmxbuf, 1);
+		OSTimeDly(30/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x56;
+	dmxbuf[12]= 0xAE;
+	dmxbuf[13]= 0xA7;
+	dmxbuf[14]= 0xAD;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(10/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x40;
+	dmxbuf[9] = 0x02;
+	dmxbuf[10]= 0x04;
+	dmxbuf[11]= 0xFF;
+	dmxbuf[12]= 0xFE;
+	dmxbuf[13]= 0x00;
+	dmxbuf[14]= 0x00;
+	dmxbuf[15]= 0x06;
+	dmxbuf[16]= 0x71;
+	
+	for (t=3; t!=0; t--)
+	{		
+		SendUart3DMX(dmxbuf, 17);	
+		OSTimeDly(49/OS_TICK);
+	}
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x4A;
+	dmxbuf[8] = 0x00;
+	dmxbuf[9] = 0xC3;
+	dmxbuf[10]= 0x04;
+	dmxbuf[11]= 0x20;
+	dmxbuf[12]= 0xFF;
+	
+	for (t=3; t!=0; t--)
+	{		
+		SendUart3DMX(dmxbuf, 13);
+		OSTimeDly(20/OS_TICK);
+	}
+	
+	OSTimeDly(2000/OS_TICK); //确保继电器动作完毕
+}
+
+void YT_send_data(u16 num, u16 addr_interval, u16 addr)
+{
+	u8 t;
+	
+	while (addr < 512)
+	{
+		for (t=3; t!=0; t--)
+		{
+			dmxbuf[0] = DMX_START_SET;
+			dmxbuf[1] = 0xFF;
+			dmxbuf[2] = 0xFE;
+			dmxbuf[3] = 0x59;
+			dmxbuf[4] = 0x54;
+			dmxbuf[5] = 0x44;
+			dmxbuf[6] = 0x4D;
+			dmxbuf[7] = 0x57;
+			dmxbuf[8] = 0x40;
+			dmxbuf[9] = 0x02;
+			dmxbuf[10]= 0x04;
+			dmxbuf[11]= HIGH(num);
+			dmxbuf[12]= LOW(num);
+			dmxbuf[13]= HIGH(addr);
+			dmxbuf[14]= LOW(addr);
+			crc16_1021(dmxbuf, 15);
+			SendUart3DMX(dmxbuf, 17);
+			OSTimeDly(6/OS_TICK);			
+		}
+		
+		for (t=3; t!=0; t--)
+		{
+			dmxbuf[0] = DMX_START_SET;
+			dmxbuf[1] = HIGH(num);
+			dmxbuf[2] = LOW(num);
+			dmxbuf[3] = 0x59;
+			dmxbuf[4] = 0x54;
+			dmxbuf[5] = 0x44;
+			dmxbuf[6] = 0x4D;
+			dmxbuf[7] = 0x4A;
+			dmxbuf[8] = 0x0C;
+			dmxbuf[9] = 0x00;
+			dmxbuf[10]= 0x00;
+			crc16_1021(dmxbuf, 11);
+			SendUart3DMX(dmxbuf, 13);
+			OSTimeDly(6/OS_TICK);
+		}
+		
+		num++;
+		addr += addr_interval;
+	}
+}
+
+void YT_send_parameters_start(void)
+{
+	u8 t;
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x56;
+	dmxbuf[12]= 0xAE;
+	dmxbuf[13]= 0xA7;
+	dmxbuf[14]= 0xAD;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(10/OS_TICK);
+	}
+}
+
+void YT_send_stop(void)
+{
+	u8 t;
+	
+	dmxbuf[0] = DMX_START_SET;
+	dmxbuf[1] = 0xFF;
+	dmxbuf[2] = 0xFF;
+	dmxbuf[3] = 0x59;
+	dmxbuf[4] = 0x54;
+	dmxbuf[5] = 0x44;
+	dmxbuf[6] = 0x4D;
+	dmxbuf[7] = 0x57;
+	dmxbuf[8] = 0x10;
+	dmxbuf[9] = 0x08;
+	dmxbuf[10]= 0x02;
+	dmxbuf[11]= 0x00;
+	dmxbuf[12]= 0x00;
+	dmxbuf[13]= 0x57;
+	dmxbuf[14]= 0x90;
+	
+	for (t=3; t!=0; t--)
+	{
+		SendUart3DMX(dmxbuf, 15);
+		OSTimeDly(10/OS_TICK);
+	}
+}
+
+void YT_send_gamma_1_0(void)
+{
+	SendUart3DMX(gamma1_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma2_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma3_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma4_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma5_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma6_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma7_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma8_1_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+}
+
+void YT_send_gamma_2_2(void)
+{
+	SendUart3DMX(gamma1_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma2_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma3_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma4_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma5_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma6_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma7_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma8_2_2, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+}
+
+void YT_send_gamma_3_0(void)
+{
+	SendUart3DMX(gamma1_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma2_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma3_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma4_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma5_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma6_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma7_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+	SendUart3DMX(gamma8_3_0, GAMMA_SIZE);
+	OSTimeDly(479/OS_TICK);
+}
+
+
+static void GUI_display_main(void)
+{
+	u8 temp_row;
+	
+	LCD_Clear();	
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//设置地址
+			temp_row = 1+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  she);
+					LCD_Display_16x16(temp_row, 7,  zhi);
+					LCD_Display_16x16(temp_row, 9,  di);
+					LCD_Display_16x16(temp_row, 11, zhi1);
+				}
+			
+			//设置参数
+			temp_row = 2+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  she);
+					LCD_Display_16x16(temp_row, 7,  zhi);
+					LCD_Display_16x16(temp_row, 9,  can);
+					LCD_Display_16x16(temp_row, 11, shu);
+				}			
+			
+			//调节颜色
+			temp_row = 3+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  tiao);
+					LCD_Display_16x16(temp_row, 7,  jie);
+					LCD_Display_16x16(temp_row, 9,  yan);
+					LCD_Display_16x16(temp_row, 11, se);
+				}
+						
+			//花样测试
+			temp_row = 4+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  hua);
+					LCD_Display_16x16(temp_row, 7,  yang);
+					LCD_Display_16x16(temp_row, 9,  ce);
+					LCD_Display_16x16(temp_row, 11, shi);
+				}			
+			
+			//系统设置
+			temp_row = 5+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  xi);
+					LCD_Display_16x16(temp_row, 7,  tong);
+					LCD_Display_16x16(temp_row, 9,  she);
+					LCD_Display_16x16(temp_row, 11, zhi);
+				}			
+			
+			//关于系统
+			temp_row = 6+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  guan);
+					LCD_Display_16x16(temp_row, 7,  yu);
+					LCD_Display_16x16(temp_row, 9,  xi);
+					LCD_Display_16x16(temp_row, 11, tong);
+				}			
+		}
+	else
+		{
+			temp_row = 1+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 5, "Address");
+			
+			temp_row = 2+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 5, "Parameter");
+			
+			temp_row = 3+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 5, "Colour");
+				
+			temp_row = 4+1-display_row;		
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 5, "Pattern");
+			
+			temp_row = 5+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 5, "Setting");
+			
+			temp_row = 6+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 5, "System");
+		}
+	
+	pointer_col = 4;
+	LCD_Display_Pointer(pointer_row, pointer_col);	
+}
+
+void GUI_init(void)
+{
+	AT24CXX_init();
+	LCD_init();
+	LCD_Clear();
+	
+	language = AT24CXX_ReadByte(EEPROM_ADDR_LANGUAGE);
+	job_mode = AT24CXX_ReadByte(EEPROM_ADDR_MODE);
+	modbus = AT24CXX_ReadByte(EEPROM_ADDR_MODBUS);
+	
+	//初始化为第一层菜单
+	menu = &StartMenuVar;
+	display_row = 1;
+	pointer_row = 1;
+	menu->display();
+}
+
+void GUI_display_number(u8 row, u8 col, u16 num)
+{
+	LCD_Display_Num(row, col+2, num%10);	
+	if (num<10) return;
+	LCD_Display_Num(row, col+1, num%100/10);
+	if (num<100) return;
+	LCD_Display_Num(row, col, num%1000/100);
+}
+
+void GUI_clear_number(u8 row, u8 col)
+{
+	LCD_Clear_16x8(row, col+2);	
+	LCD_Clear_16x8(row, col+1);
+	LCD_Clear_16x8(row, col);
+}
+
+/*-------------------地址界面分割线-----------------*/
+static void GUI_display_address(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//编址线方式
+			LCD_Display_16x16(1, 4,  bian);
+			LCD_Display_16x16(1, 6,  zhi1);
+			LCD_Display_16x16(1, 8,  xian);
+			LCD_Display_16x16(1, 10, fang);
+			LCD_Display_16x16(1, 12, shi4);		
+			//继电器方式
+			LCD_Display_16x16(2, 4,  ji2);
+			LCD_Display_16x16(2, 6,  dian);
+			LCD_Display_16x16(2, 8,  qi3);
+			LCD_Display_16x16(2, 10, fang);
+			LCD_Display_16x16(2, 12, shi4);				
+			
+			pointer_col = 3;	
+		}
+	else
+		{
+			LCD_DisplayString(1, 3, "Address line");
+			LCD_DisplayString(2, 6, "Relay");
+			
+			pointer_col = 2;
+		}	
+	
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_address_line(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//起始编号
+			LCD_Display_16x16(1, 5,  qi);
+			LCD_Display_16x16(1, 7,  shi2);
+			LCD_Display_16x16(1, 9,  bian);
+			LCD_Display_16x16(1, 11, hao);
+			LCD_DisplayString(1, 13, ":");			
+			//通道数
+			LCD_Display_16x16(2, 7,  tong1);
+			LCD_Display_16x16(2, 9,  dao);
+			LCD_Display_16x16(2, 11, shu);
+			LCD_DisplayString(2, 13, ":");			
+			//起始地址
+			LCD_Display_16x16(3, 5,  qi);
+			LCD_Display_16x16(3, 7,  shi2);
+			LCD_Display_16x16(3, 9,  di);
+			LCD_Display_16x16(3, 11, zhi1);
+			LCD_DisplayString(3, 13, ":");			
+			//确认发送
+			LCD_Display_16x16(4, 5,  que);
+			LCD_Display_16x16(4, 7,  ren);
+			LCD_Display_16x16(4, 9,  fa);
+			LCD_Display_16x16(4, 11, song);		
+			
+			pointer_col = 4;	
+		}
+	else
+		{
+			LCD_DisplayString(1, 4, "Start num:");
+			LCD_DisplayString(2, 2, "Channel sum:");
+			LCD_DisplayString(3, 3, "Start addr:");
+			LCD_DisplayString(4, 7, "Send");
+			
+			pointer_col = 1;
+		}
+	
+	GUI_display_number(1, 14, light_start_num);
+	GUI_display_number(2, 14, light_total);
+	GUI_display_number(3, 14, light_start_address);		
+	
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_address_relay(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//起始编号
+			LCD_Display_16x16(1, 5,  qi);
+			LCD_Display_16x16(1, 7,  shi2);
+			LCD_Display_16x16(1, 9,  bian);
+			LCD_Display_16x16(1, 11, hao);
+			LCD_DisplayString(1, 13, ":");			
+			//通道数
+			LCD_Display_16x16(2, 7,  tong1);
+			LCD_Display_16x16(2, 9,  dao);
+			LCD_Display_16x16(2, 11, shu);
+			LCD_DisplayString(2, 13, ":");			
+			//起始地址
+			LCD_Display_16x16(3, 5,  qi);
+			LCD_Display_16x16(3, 7,  shi2);
+			LCD_Display_16x16(3, 9,  di);
+			LCD_Display_16x16(3, 11, zhi1);
+			LCD_DisplayString(3, 13, ":");			
+			//确认发送
+			LCD_Display_16x16(4, 5,  que);
+			LCD_Display_16x16(4, 7,  ren);
+			LCD_Display_16x16(4, 9,  fa);
+			LCD_Display_16x16(4, 11, song);		
+			
+			pointer_col = 4;	
+		}
+	else
+		{
+			LCD_DisplayString(1, 4, "Start num:");
+			LCD_DisplayString(2, 2, "Channel sum:");
+			LCD_DisplayString(3, 3, "Start addr:");
+			LCD_DisplayString(4, 7, "Send");
+			
+			pointer_col = 1;
+		}
+	
+	GUI_display_number(1, 14, light_start_num);
+	GUI_display_number(2, 14, light_total);
+	GUI_display_number(3, 14, light_start_address);		
+	
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_address_line_finish(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{				
+			//设置地址
+			LCD_Display_16x16(1, 5,  she);
+			LCD_Display_16x16(1, 7,  zhi);
+			LCD_Display_16x16(1, 9,  di);
+			LCD_Display_16x16(1, 11, zhi1);	
+			//编址线方式
+			LCD_Display_16x16(2, 4,  bian);
+			LCD_Display_16x16(2, 6,  zhi1);
+			LCD_Display_16x16(2, 8,  xian);
+			LCD_Display_16x16(2, 10, fang);
+			LCD_Display_16x16(2, 12, shi4);						
+			//正在发送
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, fa);
+			LCD_Display_16x16(3, 11, song);						
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}	
+		}
+	else
+		{
+			LCD_DisplayString(2, 5, "Address");
+			LCD_DisplayString(3, 5, "Sending");
+			
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 6, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 5, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 5, "Slave");
+					break;
+			}
+		}
+	
+	switch (job_mode)
+	{
+		case JOB_MODE_SELF:
+			{
+				YT_send_address_line(light_start_num, light_total, light_start_address);
+			}			
+			break;
+			
+		case JOB_MODE_HOST:
+			{
+				packet_num = 0;			
+				rf_sendbuf[0] = MENU_INDEX_ADDRESS_RELAY;
+				rf_sendbuf[1] = packet_num;
+				rf_sendbuf[2] = HIGH(light_start_num);
+				rf_sendbuf[3] = LOW(light_start_num);
+				rf_sendbuf[4] = HIGH(light_total);
+				rf_sendbuf[5] = LOW(light_total);
+				rf_sendbuf[6] = HIGH(light_start_address);
+				rf_sendbuf[7] = LOW(light_start_address);			
+				crc16_1021(rf_sendbuf, 8);
+				RF_SendPacket(rf_sendbuf, RF_SIZE);
+			}			
+			break;
+	}	
+	
+	//自动退回上层菜单
+	menu = menu->ParentMenu;
+	display_row = 1;
+	pointer_row = 1;
+	menu->display();
+}
+
+static void GUI_display_address_relay_finish(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{			
+			//设置地址
+			LCD_Display_16x16(1, 5,  she);
+			LCD_Display_16x16(1, 7,  zhi);
+			LCD_Display_16x16(1, 9,  di);
+			LCD_Display_16x16(1, 11, zhi1);		
+			//继电器方式
+			LCD_Display_16x16(2, 4,  ji2);
+			LCD_Display_16x16(2, 6,  dian);
+			LCD_Display_16x16(2, 8,  qi3);
+			LCD_Display_16x16(2, 10, fang);
+			LCD_Display_16x16(2, 12, shi4);						
+			//正在发送
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, fa);
+			LCD_Display_16x16(3, 11, song);						
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}	
+		}
+	else
+		{
+			LCD_DisplayString(2, 5, "Address");
+			LCD_DisplayString(3, 5, "Sending");
+			
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 6, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 5, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 5, "Slave");
+					break;
+			}
+		}
+	
+	switch (job_mode)
+	{
+		case JOB_MODE_SELF:
+			{
+				YT_send_address_start();					
+				YT_send_data(light_start_num, light_total, light_start_address);			
+				YT_send_stop();
+			}			
+			break;
+			
+		case JOB_MODE_HOST:
+			{
+				packet_num = 0;			
+				rf_sendbuf[0] = MENU_INDEX_ADDRESS_RELAY;
+				rf_sendbuf[1] = packet_num;
+				rf_sendbuf[2] = HIGH(light_start_num);
+				rf_sendbuf[3] = LOW(light_start_num);
+				rf_sendbuf[4] = HIGH(light_total);
+				rf_sendbuf[5] = LOW(light_total);
+				rf_sendbuf[6] = HIGH(light_start_address);
+				rf_sendbuf[7] = LOW(light_start_address);			
+				crc16_1021(rf_sendbuf, 8);
+				RF_SendPacket(rf_sendbuf, RF_SIZE);
+			}			
+			break;
+	}	
+	
+	//自动退回上层菜单
+	menu = menu->ParentMenu;
+	display_row = 1;
+	pointer_row = 1;
+	menu->display();
+}
+
+/*-------------------参数界面分割线-----------------*/
+static void GUI_display_parameters(void)
+{
+	u8 temp_row;
+	
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//类型
+			temp_row = 1+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, lei);
+					LCD_Display_16x16(temp_row, 4, xing);
+					LCD_DisplayString(temp_row, 6, ":");			
+					
+					switch (chip_type)
+					{
+						case PWM_OUTPUT:  LCD_DisplayString(temp_row, 7, "PWM_OUT");  break;
+						case TM18XX_400K: LCD_DisplayString(temp_row, 7, "18_400K");  break;
+						case MY9221:      LCD_DisplayString(temp_row, 7, "MY9221");   break;
+						case MBI6020:     LCD_DisplayString(temp_row, 7, "MBI6020");  break;
+						case MBI6021:     LCD_DisplayString(temp_row, 7, "MBI6021");  break;
+						case MBI6023:     LCD_DisplayString(temp_row, 7, "MBI6023");  break;
+						case MBI6030:     LCD_DisplayString(temp_row, 7, "MBI6030");  break;
+						case WS2803:      LCD_DisplayString(temp_row, 7, "WS2803");   break;
+						case LPD8806:     LCD_DisplayString(temp_row, 7, "LPD8806");  break;
+						case TLS3006_8:   LCD_DisplayString(temp_row, 7, "TLS30068"); break;
+						case TLS3001:     LCD_DisplayString(temp_row, 7, "TLS3001");  break;
+						case TM18XX_800K: LCD_DisplayString(temp_row, 7, "18_800K");  break;
+						case TM1829:      LCD_DisplayString(temp_row, 7, "TM1829");   break;
+						case MY9231:      LCD_DisplayString(temp_row, 7, "MY9231");   break;
+						case TLC5971:     LCD_DisplayString(temp_row, 7, "TLC5971");  break;
+						case MBI6033:     LCD_DisplayString(temp_row, 7, "MBI6033");  break;
+					}		
+				}				
+			
+			//灰度
+			temp_row = 2+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, hui);
+					LCD_Display_16x16(temp_row, 4, du);
+					LCD_DisplayString(temp_row, 6, ":");	
+					LCD_DisplayString(temp_row, 9, "BIT");		
+					GUI_display_number(temp_row, 6, gray_level);	
+				}						
+			
+			//PWM
+			temp_row = 3+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "PWM:");
+			
+					switch (pwm_frequency)
+					{
+						case PWM_60HZ:   LCD_DisplayString(temp_row, 6, "PWM_60HZ");    break;
+						case PWM_120HZ:  LCD_DisplayString(temp_row, 6, "PWM_120HZ");   break;
+						case PWM_240HZ:  LCD_DisplayString(temp_row, 6, "PWM_240HZ");   break;
+						case PWM_480HZ:  LCD_DisplayString(temp_row, 6, "PWM_480HZ");   break;
+						case PWM_960HZ:  LCD_DisplayString(temp_row, 6, "PWM_960HZ");   break;
+						case PWM_1920HZ: LCD_DisplayString(temp_row, 6, "PWM_1920HZ");  break;
+						case PWM_3840HZ: LCD_DisplayString(temp_row, 6, "PWM_3840HZ");  break;
+					}
+				}
+			
+			
+			//通道数
+			temp_row = 4+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, tong1);
+					LCD_Display_16x16(temp_row, 4, dao);
+					LCD_Display_16x16(temp_row, 6, shu);
+					LCD_DisplayString(temp_row, 8, ":");
+					GUI_display_number(temp_row, 9, dmx_channel_total);
+				} 			
+			
+			//并联数
+			temp_row = 5+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, bing);
+					LCD_Display_16x16(temp_row, 4, lian);
+					LCD_Display_16x16(temp_row, 6, shu);
+					LCD_DisplayString(temp_row, 8, ":");
+					GUI_display_number(temp_row, 9, output_type);
+				}			
+			
+			//波特率
+			temp_row = 6+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, bo);
+					LCD_Display_16x16(temp_row, 4, te);
+					LCD_Display_16x16(temp_row, 6, lv);
+					LCD_DisplayString(temp_row, 8, ":");
+					
+					switch (serial_baud)
+					{
+						case BAUD_SELF: 
+							{
+								LCD_Display_16x16(temp_row, 9, zi);
+								LCD_Display_16x16(temp_row, 11, shi3);
+								LCD_Display_16x16(temp_row, 13, ying1);
+							}
+							break;
+						
+						case BAUD_250K: 
+							{
+								LCD_DisplayString(temp_row, 9, "250K");
+							}
+							break;
+					}
+				}
+			
+			
+			//极性
+			temp_row = 7+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, ji1);
+					LCD_Display_16x16(temp_row, 4, xing1);
+					LCD_DisplayString(temp_row, 6, ":");
+					LCD_Display_16x16(temp_row, 9, you);
+					LCD_Display_16x16(temp_row, 11, xiao);
+					
+					switch (output_polarity)
+					{
+						case VALID_HIGH: LCD_Display_16x16(temp_row, 7, gao); break;				
+						case VALID_LOW:  LCD_Display_16x16(temp_row, 7, di1); break;
+					}
+				}			
+			
+			//自检
+			temp_row = 8+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, zi);
+					LCD_Display_16x16(temp_row, 4, jian1);
+					LCD_DisplayString(temp_row, 6, ":");
+					
+					switch (chip_self_check)
+					{
+						case SELF_NO: 
+							{
+								LCD_Display_16x16(temp_row, 7,  wu);
+								LCD_Display_16x16(temp_row, 9,  zi);
+								LCD_Display_16x16(temp_row, 11, jian1);
+							} 
+							break;
+						
+						case SELF_R_G_B: 
+							{
+								LCD_Display_16x16(temp_row, 7,  tiao1);
+								LCD_Display_16x16(temp_row, 9,  bian1);
+							} 
+							break;
+						
+						case SELF_A: 
+							{
+								LCD_DisplayString(temp_row, 7, "A");
+								LCD_Display_16x16(temp_row, 8,  chang);
+								LCD_Display_16x16(temp_row, 10, liang);
+							} 
+							break;
+						
+						case SELF_B: 
+							{
+								LCD_DisplayString(temp_row, 7, "B");
+								LCD_Display_16x16(temp_row, 8,  chang);
+								LCD_Display_16x16(temp_row, 10, liang);
+							} 
+							break;
+						
+						case SELF_C: 
+							{
+								LCD_DisplayString(temp_row, 7, "C");
+								LCD_Display_16x16(temp_row, 8,  chang);
+								LCD_Display_16x16(temp_row, 10, liang);
+							} 
+							break;
+						
+						case SELF_D: 
+							{
+								LCD_DisplayString(temp_row, 7, "D");
+								LCD_Display_16x16(temp_row, 8,  chang);
+								LCD_Display_16x16(temp_row, 10, liang);
+							} 
+							break;
+						
+						case SELF_ALL: 
+							{
+								LCD_Display_16x16(temp_row, 7,  suo);
+								LCD_Display_16x16(temp_row, 9,  you);
+								LCD_Display_16x16(temp_row, 11, chang);
+								LCD_Display_16x16(temp_row, 13, liang);
+							} 
+							break;
+						
+						case SELF_CHANGE: 
+							{
+								LCD_Display_16x16(temp_row, 7,  qi1);
+								LCD_Display_16x16(temp_row, 9,  cai);
+								LCD_Display_16x16(temp_row, 11, jian2);
+								LCD_Display_16x16(temp_row, 13, bian1);
+							} 
+							break;
+						
+						case SELF_FAST_SPEED: 
+							{
+								LCD_Display_16x16(temp_row, 7,  kuai);
+								LCD_Display_16x16(temp_row, 9,  su);
+								LCD_Display_16x16(temp_row, 11, shan);
+								LCD_Display_16x16(temp_row, 13, shuo);
+							} 
+							break;
+						
+						case SELF_SPEED: 
+							{
+								LCD_Display_16x16(temp_row, 7,  zhong);
+								LCD_Display_16x16(temp_row, 9,  su);
+								LCD_Display_16x16(temp_row, 11, shan);
+								LCD_Display_16x16(temp_row, 13, shuo);
+							} 
+							break;
+						
+						case SELF_SLOW_SPEED: 
+							{
+								LCD_Display_16x16(temp_row, 7,  man);
+								LCD_Display_16x16(temp_row, 9,  su);
+								LCD_Display_16x16(temp_row, 11, shan);
+								LCD_Display_16x16(temp_row, 13, shuo);
+							} 
+							break;	
+					}
+				}		
+			
+			//半功率
+			temp_row = 9+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, ban1);
+					LCD_Display_16x16(temp_row, 4, gong);
+					LCD_Display_16x16(temp_row, 6, lv);
+					LCD_DisplayString(temp_row, 8, ":");
+					LCD_Display_16x16(temp_row, 12, du1);
+					GUI_display_number(temp_row, 9, half_power_output_temperature);
+				}				
+			
+			//关闭
+			temp_row = 10+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, guan1);
+					LCD_Display_16x16(temp_row, 4, bi);
+					LCD_DisplayString(temp_row, 6, ":");
+					LCD_Display_16x16(temp_row, 10, du1);
+					GUI_display_number(temp_row, 7, close_light_temperature);	
+				}
+			
+			
+			//颜色
+			temp_row = 11+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 2, yan);
+					LCD_Display_16x16(temp_row, 4, se);
+					LCD_DisplayString(temp_row, 6, ":");
+					LCD_Display_16x16(temp_row, 9, se);
+					
+					switch (colour_mode)
+					{
+						case 1: LCD_Display_16x16(temp_row, 7, dan);    break;
+						case 2: LCD_Display_16x16(temp_row, 7, shuang); break;
+						case 3: LCD_Display_16x16(temp_row, 7, san);    break;
+						case 4: LCD_Display_16x16(temp_row, 7, si);     break;
+					}
+				}
+			
+			
+			//Gamma校正
+			temp_row = 12+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(12+1-display_row, 2, "Gamma:");
+			
+					switch (gamma)
+					{
+						case GAMMA_1_0: LCD_DisplayString(temp_row, 8, "1.0"); break;
+						case GAMMA_2_2: LCD_DisplayString(temp_row, 8, "2.2"); break;
+						case GAMMA_3_0: LCD_DisplayString(temp_row, 8, "3.0"); break;
+					}
+				}			
+			
+			//确认发送
+			temp_row = 13+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  que);
+					LCD_Display_16x16(temp_row, 7,  ren);
+					LCD_Display_16x16(temp_row, 9,  fa);
+					LCD_Display_16x16(temp_row, 11, song);
+				}
+		}
+	else
+		{
+			//类型
+			temp_row = 1+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Type:");		
+					
+					switch (chip_type)
+					{
+						case PWM_OUTPUT:  LCD_DisplayString(temp_row, 7, "PWM_OUT");  break;
+						case TM18XX_400K: LCD_DisplayString(temp_row, 7, "18_400K");  break;
+						case MY9221:      LCD_DisplayString(temp_row, 7, "MY9221");   break;
+						case MBI6020:     LCD_DisplayString(temp_row, 7, "MBI6020");  break;
+						case MBI6021:     LCD_DisplayString(temp_row, 7, "MBI6021");  break;
+						case MBI6023:     LCD_DisplayString(temp_row, 7, "MBI6023");  break;
+						case MBI6030:     LCD_DisplayString(temp_row, 7, "MBI6030");  break;
+						case WS2803:      LCD_DisplayString(temp_row, 7, "WS2803");   break;
+						case LPD8806:     LCD_DisplayString(temp_row, 7, "LPD8806");  break;
+						case TLS3006_8:   LCD_DisplayString(temp_row, 7, "TLS30068"); break;
+						case TLS3001:     LCD_DisplayString(temp_row, 7, "TLS3001");  break;
+						case TM18XX_800K: LCD_DisplayString(temp_row, 7, "18_800K");  break;
+						case TM1829:      LCD_DisplayString(temp_row, 7, "TM1829");   break;
+						case MY9231:      LCD_DisplayString(temp_row, 7, "MY9231");   break;
+						case TLC5971:     LCD_DisplayString(temp_row, 7, "TLC5971");  break;
+						case MBI6033:     LCD_DisplayString(temp_row, 7, "MBI6033");  break;
+					}		
+				}				
+			
+			//灰度
+			temp_row = 2+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Gray:  BIT");		
+					GUI_display_number(temp_row, 6, gray_level);	
+				}						
+			
+			//PWM
+			temp_row = 3+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "PWM:");
+			
+					switch (pwm_frequency)
+					{
+						case PWM_60HZ:   LCD_DisplayString(temp_row, 6, "PWM_60HZ");    break;
+						case PWM_120HZ:  LCD_DisplayString(temp_row, 6, "PWM_120HZ");   break;
+						case PWM_240HZ:  LCD_DisplayString(temp_row, 6, "PWM_240HZ");   break;
+						case PWM_480HZ:  LCD_DisplayString(temp_row, 6, "PWM_480HZ");   break;
+						case PWM_960HZ:  LCD_DisplayString(temp_row, 6, "PWM_960HZ");   break;
+						case PWM_1920HZ: LCD_DisplayString(temp_row, 6, "PWM_1920HZ");  break;
+						case PWM_3840HZ: LCD_DisplayString(temp_row, 6, "PWM_3840HZ");  break;
+					}
+				}
+			
+			
+			//通道数
+			temp_row = 4+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Channel sum:");
+					GUI_display_number(temp_row, 14, dmx_channel_total);
+				} 			
+			
+			//并联数
+			temp_row = 5+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Multiple:");
+					GUI_display_number(temp_row, 11, output_type);
+				}			
+			
+			//波特率
+			temp_row = 6+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Baud rate:");
+								
+					switch (serial_baud)
+					{
+						case BAUD_SELF: LCD_DisplayString(temp_row, 12, "Auto"); break;						
+						case BAUD_250K: LCD_DisplayString(temp_row, 12, "250K"); break;
+					}
+				}			
+			
+			//极性
+			temp_row = 7+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Polarity:");
+					
+					switch (output_polarity)
+					{
+						case VALID_HIGH: LCD_DisplayString(temp_row, 11, "High"); break;				
+						case VALID_LOW:  LCD_DisplayString(temp_row, 11, "Low");  break;
+					}
+				}			
+			
+			//自检
+			temp_row = 8+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Check:");
+					
+					switch (chip_self_check)
+					{
+						case SELF_NO:     LCD_DisplayString(temp_row, 8, "Not"); break;						
+						case SELF_R_G_B:  LCD_DisplayString(temp_row, 8, "Hop"); break;						
+						case SELF_A:      LCD_DisplayString(temp_row, 8, "A Show"); break;						
+						case SELF_B:      LCD_DisplayString(temp_row, 8, "B Show"); break;						
+						case SELF_C:      LCD_DisplayString(temp_row, 8, "C Show"); break;						
+						case SELF_D:      LCD_DisplayString(temp_row, 8, "D Show"); break;					
+						case SELF_ALL:    LCD_DisplayString(temp_row, 8, "All Show");  break;							
+						case SELF_CHANGE: LCD_DisplayString(temp_row, 8, "Gradually"); break;						
+						case SELF_FAST_SPEED: LCD_DisplayString(temp_row, 8, "Fast");    break;
+						case SELF_SPEED:      LCD_DisplayString(temp_row, 8, "General"); break;
+						case SELF_SLOW_SPEED: LCD_DisplayString(temp_row, 8, "Slow");    break;
+					}
+				}		
+			
+			//半功率
+			temp_row = 9+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Half:");
+					GUI_display_number(temp_row, 7, half_power_output_temperature);
+					LCD_Display_16x16(temp_row, 10, du1);
+				}				
+			
+			//关闭
+			temp_row = 10+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{					
+					LCD_DisplayString(temp_row, 2, "Close:");
+					GUI_display_number(temp_row, 8, close_light_temperature);	
+					LCD_Display_16x16(temp_row, 11, du1);
+				}			
+			
+			//颜色
+			temp_row = 11+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 2, "Colour:");
+					GUI_display_number(temp_row, 7, colour_mode);			
+				}			
+			
+			//Gamma校正
+			temp_row = 12+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(12+1-display_row, 2, "Gamma:");
+			
+					switch (gamma)
+					{
+						case GAMMA_1_0: LCD_DisplayString(temp_row, 8, "1.0"); break;
+						case GAMMA_2_2: LCD_DisplayString(temp_row, 8, "2.2"); break;
+						case GAMMA_3_0: LCD_DisplayString(temp_row, 8, "3.0"); break;
+					}
+				}			
+			
+			//确认发送
+			temp_row = 13+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 7, "Send");
+				}
+		}
+	
+	pointer_col = 1;
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_parameters_finish(void)
+{
+	u8 t;	
+	
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{		
+			//设置参数
+			LCD_Display_16x16(2, 5,  she);
+			LCD_Display_16x16(2, 7,  zhi);
+			LCD_Display_16x16(2, 9,  can);
+			LCD_Display_16x16(2, 11, shu);			
+			//正在发送
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, fa);
+			LCD_Display_16x16(3, 11, song);								
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}			
+		}
+	else
+		{
+			LCD_DisplayString(2, 5, "Parameters");
+			LCD_DisplayString(3, 6, "Sending");
+			
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+	
+	switch (job_mode)
+	{
+		case JOB_MODE_SELF:
+			{
+				YT_send_flicker();
+				YT_send_parameters_start();
+				
+				for (t=3; t!=0; t--)
+				{
+					dmxbuf[0] = DMX_START_SET;
+					dmxbuf[1] = 0xFF;
+					dmxbuf[2] = 0xFF;
+					dmxbuf[3] = 0x59;
+					dmxbuf[4] = 0x54;
+					dmxbuf[5] = 0x44;
+					dmxbuf[6] = 0x4D;
+					dmxbuf[7] = 0x57;
+					dmxbuf[8] = 0x40;
+					dmxbuf[9] = 0x06;
+					dmxbuf[10]= 0x0A; //长度
+					dmxbuf[11]= pwm_frequency; //PWM刷新率 01:60Hz 02:120Hz 03:240Hz ……
+					dmxbuf[12]= 0x00; //上电后自动编址 00:禁止 01:使能
+					dmxbuf[13]= gray_level; //灰度等级（选择PWM时） 10:16bit 0F:15bit 0E:14bit ……
+					dmxbuf[14]= 0x16;
+					dmxbuf[15]= dmx_channel_total; //DMX通道数 0C:12通道 18:24通道 24:36通道 ……
+					dmxbuf[16]= colour_mode; //颜色模式 01:单色 02:双色 03:三色 04:四色
+					dmxbuf[17]= chip_self_check; //芯片自检 00:无自检 01:红蓝绿跳变 02:通道A常亮 03:通道B常亮 04:通道C常亮 05:通道D常亮 06:所有通道常亮 07:七彩渐变 08:快速闪烁 09:中速闪烁 0A:慢速闪烁
+					dmxbuf[18]= chip_type; //芯片类型 00:PWM_OUTPUT 01:TM18XX_400K 02:MY9221 03:MBI6020 04:MBI6021 05:MBI6023 ……
+					dmxbuf[19]= output_polarity; //输出极性 00:高电平有效 01:低电平有效
+					dmxbuf[20]= serial_baud; //串行波特率02:250K;00:自适应
+					crc16_1021(dmxbuf, 21);
+					SendUart3DMX(dmxbuf, 23);
+					OSTimeDly(49/OS_TICK);
+					
+					dmxbuf[0] = DMX_START_SET;
+					dmxbuf[1] = 0xFF;
+					dmxbuf[2] = 0xFF;
+					dmxbuf[3] = 0x59;
+					dmxbuf[4] = 0x54;
+					dmxbuf[5] = 0x44;
+					dmxbuf[6] = 0x4D;
+					dmxbuf[7] = 0x57;
+					dmxbuf[8] = 0x40;
+					dmxbuf[9] = 0x14;
+					dmxbuf[10]= 0x09;
+					dmxbuf[11]= dmx_channel_total * output_type; //N路并联后总通道数量
+					dmxbuf[12]= 0x00;
+					dmxbuf[13]= 0x00;
+					dmxbuf[14]= 0x00;
+					dmxbuf[15]= 0x00;
+					dmxbuf[16]= half_power_output_temperature; //半功率输出温度
+					dmxbuf[17]= close_light_temperature; //关闭灯具温度
+					dmxbuf[18]= 0x00; //上电后自动编址 禁止:00 00 使能:56 AE
+					dmxbuf[19]= 0x00;
+					crc16_1021(dmxbuf, 20);
+					SendUart3DMX(dmxbuf, 22);
+					OSTimeDly(49/OS_TICK);
+				}
+				
+				switch (gamma)
+				{
+					case GAMMA_1_0: YT_send_gamma_1_0(); break;				
+					case GAMMA_2_2: YT_send_gamma_2_2(); break;				
+					case GAMMA_3_0: YT_send_gamma_3_0(); break;
+				}
+				
+				YT_send_stop();
+			}
+			break;
+			
+		case JOB_MODE_HOST:
+			{
+				packet_num = 0;
+				rf_sendbuf[0] = MENU_INDEX_PARAMETERS;
+				rf_sendbuf[1] = packet_num;
+				rf_sendbuf[2] = pwm_frequency; //PWM刷新率 01:60Hz 02:120Hz 03:240Hz ……
+				rf_sendbuf[3] = 0x00; //上电后自动编址 00:禁止 01:使能
+				rf_sendbuf[4] = gray_level; //灰度等级（选择PWM时） 10:16bit 0F:15bit 0E:14bit ……
+				rf_sendbuf[5] = 0x16;
+				rf_sendbuf[6] = dmx_channel_total; //DMX通道数 0C:12通道 18:24通道 24:36通道 ……
+				rf_sendbuf[7] = colour_mode; //颜色模式 01:单色 02:双色 03:三色 04:四色
+				rf_sendbuf[8] = chip_self_check; //芯片自检 00:无自检 01:红蓝绿跳变 02:通道A常亮 03:通道B常亮 04:通道C常亮 05:通道D常亮 06:所有通道常亮 07:七彩渐变 08:快速闪烁 09:中速闪烁 0A:慢速闪烁
+				rf_sendbuf[9] = chip_type; //芯片类型 00:PWM_OUTPUT 01:TM18XX_400K 02:MY9221 03:MBI6020 04:MBI6021 05:MBI6023 ……
+				rf_sendbuf[10]= output_polarity; //输出极性 00:高电平有效 01:低电平有效
+				rf_sendbuf[11]= serial_baud; //串行波特率02:250K;00:自适应
+				rf_sendbuf[12]= dmx_channel_total; //N路并联后总通道数量
+				rf_sendbuf[13]= 0x00;		
+				rf_sendbuf[14]= 0x00;
+				rf_sendbuf[15]= 0x00;		
+				rf_sendbuf[16]= 0x00;
+				rf_sendbuf[17]= half_power_output_temperature; //半功率输出温度		
+				rf_sendbuf[18]= close_light_temperature; //关闭灯具温度
+				rf_sendbuf[19]= 0x00; //上电后自动编址 禁止:00 00 使能:56 AE
+				rf_sendbuf[20]= 0x00;
+				rf_sendbuf[21]= gamma; //gamma		
+				crc16_1021(rf_sendbuf, 22);
+				RF_SendPacket(rf_sendbuf, RF_SIZE);
+			}
+			break;
+	}
+		
+	//自动退回上层菜单
+	menu = menu->ParentMenu;
+	display_row = 1;
+	pointer_row = 1;
+	menu->display();
+}
+
+/*-------------------颜色界面分割线-----------------*/
+static void GUI_display_colour(void)
+{	
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//整体调节
+			LCD_Display_16x16(1, 5, zheng);
+			LCD_Display_16x16(1, 7, ti);
+			LCD_Display_16x16(1, 9, tiao);
+			LCD_Display_16x16(1, 11, jie);		
+			//通道调节
+			LCD_Display_16x16(2, 5, tong1);
+			LCD_Display_16x16(2, 7, dao);
+			LCD_Display_16x16(2, 9, tiao);
+			LCD_Display_16x16(2, 11, jie);	
+		#if MENU_EXTRA_EN > 0
+  		//角度调节
+			LCD_Display_16x16(3, 5, jiao);
+			LCD_Display_16x16(3, 7, du);
+			LCD_Display_16x16(3, 9, tiao);
+			LCD_Display_16x16(3, 11, jie);
+		#endif
+			
+			pointer_col = 4;
+		}
+	else
+		{
+			LCD_DisplayString(1, 4, "Adjust all");
+			LCD_DisplayString(2, 2, "Adjust channel");
+			
+			pointer_col = 1;
+		}		
+										
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_colour_all(void)
+{
+	u8 temp_row;
+	u16 i;
+		
+	menu->ChildrenMenuTotal = colour_total + 1;
+	
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{	
+			//颜色数：
+			temp_row = 1+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  yan);
+					LCD_Display_16x16(temp_row, 7,  se);
+					LCD_Display_16x16(temp_row, 9,  shu);	
+					LCD_DisplayString(temp_row, 11, ":");
+					GUI_display_number(temp_row, 10, colour_total);					
+				}					
+		}
+	else
+		{
+			//颜色数：
+			temp_row = 1+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(1+1-display_row, 5, "Colour:");
+					GUI_display_number(temp_row, 10, colour_total);	
+				}			
+		}
+	
+	temp_row = 2+1-display_row;
+	
+	if ((temp_row<5) && (temp_row!=0))
+		{
+			LCD_DisplayString(temp_row, 6, "1:");
+			GUI_display_number(temp_row, 8, channel[1]);
+		}	
+	
+	
+	if (colour_total>1)
+		{
+			temp_row = 3+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 6, "2:");
+					GUI_display_number(temp_row, 8, channel[2]);
+				}			
+		}
+	
+	
+	if (colour_total>2)
+		{
+			temp_row = 4+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 6, "3:");
+					GUI_display_number(temp_row, 8, channel[3]);
+				}			
+		}
+	
+	
+	if (colour_total>3)
+		{
+			temp_row = 5+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 6, "4:");
+					GUI_display_number(temp_row, 8, channel[4]);
+				}			
+		}
+	
+	if (colour_total>4)
+		{
+			temp_row = 6+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 6, "5:");
+					GUI_display_number(temp_row, 8, channel[5]);
+				}			
+		}
+	
+	if (colour_total>5)
+		{
+			temp_row = 7+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_DisplayString(temp_row, 6, "6:");
+					GUI_display_number(temp_row, 8, channel[6]);
+				}			
+		}
+	
+	for (i=1; i<CH_SIZE; i+=colour_total)
+	{
+		channel[i] = channel[1];
+		if (colour_total==1) continue;
+		channel[i+1] = channel[2];
+		if (colour_total==2) continue;
+		channel[i+2] = channel[3];
+		if (colour_total==3) continue;
+		channel[i+3] = channel[4];
+		if (colour_total==4) continue;
+		channel[i+4] = channel[5];
+		if (colour_total==5) continue;
+		channel[i+5] = channel[6];
+	}
+	
+	pointer_col = 4;											
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_colour_ch(void)
+{
+	u16 temp_row;
+	u16 i;
+	
+	LCD_Clear();
+	
+	for (i=1; i<CH_SIZE; i++)
+	{
+		temp_row = i+1-display_row;
+		
+		if ((temp_row<5) && (temp_row!=0))
+			{
+				GUI_display_number(temp_row, 5, i);
+				LCD_DisplayString(temp_row,  8, ":");
+				GUI_display_number(temp_row, 9, channel[i]);
+			}		
+	}
+	
+	pointer_col = 4;											
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+#if MENU_EXTRA_EN > 0
+static void GUI_display_extra(void)
+{
+	u16 temp_row;
+	u16 i;
+	
+	LCD_Clear();
+	
+	for (i=1; i<CH_SIZE; i++)
+	{
+		temp_row = i+1-display_row;
+		
+		if ((temp_row<5) && (temp_row!=0))
+			{
+				GUI_display_number(temp_row, 1, ((i+1)>>1));
+				LCD_Display_16x16(temp_row, 4, hao);
+				LCD_Display_16x16(temp_row, 6, chui);
+				LCD_Display_16x16(temp_row, 8, zhi2);
+				LCD_DisplayString(temp_row,  10, ":");
+				GUI_display_number(temp_row, 11, channel[i]);
+				LCD_Display_16x16(temp_row, 14, du);
+			}		
+			
+		i++;
+		
+		temp_row = i+1-display_row;
+		
+		if ((temp_row<5) && (temp_row!=0))
+			{
+				GUI_display_number(temp_row, 1, ((i+1)>>1));
+				LCD_Display_16x16(temp_row, 4, hao);
+				LCD_Display_16x16(temp_row, 6, shui);
+				LCD_Display_16x16(temp_row, 8, ping);
+				LCD_DisplayString(temp_row,  10, ":");
+				GUI_display_number(temp_row, 11, channel[i]);
+				LCD_Display_16x16(temp_row, 14, du);
+			}	
+	}
+	
+	pointer_col = 2;											
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_extra_finish(void)
+{
+	LCD_Clear();
+	
+	//正在调节
+	LCD_Display_16x16(3, 5, zheng1);
+	LCD_Display_16x16(3, 7, zai);
+	LCD_Display_16x16(3, 9, tiao);
+	LCD_Display_16x16(3, 11, jie);	
+	
+	packet_num = 0;			
+	rf_sendbuf[0] = MENU_INDEX_EXTRA;
+	rf_sendbuf[1] = packet_num;
+	rf_sendbuf[2] = MENU_EXTRA_HDR1;
+	rf_sendbuf[3] = MENU_EXTRA_HDR2;
+	rf_sendbuf[4] = MENU_EXTRA_HDR3;
+	rf_sendbuf[5] = channel[1];
+	rf_sendbuf[6] = channel[2];
+	rf_sendbuf[7] = channel[3];
+	rf_sendbuf[8] = channel[4];
+	//crc16_1021(rf_sendbuf, 4);
+	RF_SendPacket(rf_sendbuf, RF_SIZE);
+	
+	OSTimeDly(5000/OS_TICK);
+	
+	//自动退回上层菜单
+	menu = menu->ParentMenu;
+	display_row = 1;
+	pointer_row = 1;
+	menu->display();
+}
+#endif
+
+/*-------------------花样界面分割线-----------------*/
+static void GUI_display_pattern(void)
+{
+	u16 temp_row;
+	
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{		
+			//三色渐变
+			temp_row = 1+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5, san);
+					LCD_Display_16x16(temp_row, 7, se);
+					LCD_Display_16x16(temp_row, 9, jian2);
+					LCD_Display_16x16(temp_row, 11, bian1);
+				}
+			
+			//四色渐变
+			temp_row = 2+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5, si);
+					LCD_Display_16x16(temp_row, 7, se);
+					LCD_Display_16x16(temp_row, 9, jian2);
+					LCD_Display_16x16(temp_row, 11, bian1);
+				}			
+			
+			//三色流水
+			temp_row = 3+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5, san);
+					LCD_Display_16x16(temp_row, 7, se);
+					LCD_Display_16x16(temp_row, 9, liu);
+					LCD_Display_16x16(temp_row, 11, shui);
+				}
+						
+			//四色流水
+			temp_row = 4+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5, si);
+					LCD_Display_16x16(temp_row, 7, se);
+					LCD_Display_16x16(temp_row, 9, liu);
+					LCD_Display_16x16(temp_row, 11, shui);
+				}			
+			
+			//单通道流水
+			temp_row = 5+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 4,  dan);
+					LCD_Display_16x16(temp_row, 6,  tong1);
+					LCD_Display_16x16(temp_row, 8,  dao);
+					LCD_Display_16x16(temp_row, 10, liu);
+					LCD_Display_16x16(temp_row, 12, shui);
+				}	
+				
+			//单色渐变
+			temp_row = 6+1-display_row;
+			
+			if ((temp_row<5) && (temp_row!=0))
+				{
+					LCD_Display_16x16(temp_row, 5,  dan);
+					LCD_Display_16x16(temp_row, 7,  se);
+					LCD_Display_16x16(temp_row, 9,  jian2);
+					LCD_Display_16x16(temp_row, 11, bian1);
+				}	
+			
+			pointer_col = 3;
+		}
+	else
+		{
+			temp_row = 1+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 3, "Three change");
+							
+			temp_row = 2+1-display_row;
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 3, "Four change");
+
+			temp_row = 3+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 3, "Three flow");		
+			
+			temp_row = 4+1-display_row;
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 3, "Four flow");		
+			
+			temp_row = 5+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 3, "Channel flow");	
+				
+			temp_row = 6+1-display_row;			
+			if ((temp_row<5) && (temp_row!=0))
+				LCD_DisplayString(temp_row, 3, "One change");
+			
+			pointer_col = 2;
+		}
+												
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+static void GUI_display_colour_change_3(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//三色渐变
+			LCD_Display_16x16(2, 5, san);
+			LCD_Display_16x16(2, 7, se);
+			LCD_Display_16x16(2, 9, jian2);
+			LCD_Display_16x16(2, 11, bian1);
+			//正在测试
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, ce);
+			LCD_Display_16x16(3, 11, shi);
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}
+		}
+	else
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//三色渐变
+			LCD_DisplayString(2, 3, "Three change");
+			//正在测试
+			LCD_DisplayString(3, 5, "Testing");
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+}
+
+static void GUI_display_colour_change_4(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//四色渐变
+			LCD_Display_16x16(2, 5, si);
+			LCD_Display_16x16(2, 7, se);
+			LCD_Display_16x16(2, 9, jian2);
+			LCD_Display_16x16(2, 11, bian1);
+			//正在测试
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, ce);
+			LCD_Display_16x16(3, 11, shi);
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}
+		}
+	else
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//四色渐变
+			LCD_DisplayString(2, 3, "Four change");
+			//正在测试
+			LCD_DisplayString(3, 5, "Testing");
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+}
+
+static void GUI_display_colour_rotation_3(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//三色流水
+			LCD_Display_16x16(2, 5, san);
+			LCD_Display_16x16(2, 7, se);
+			LCD_Display_16x16(2, 9, liu);
+			LCD_Display_16x16(2, 11, shui);
+			//正在测试
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, ce);
+			LCD_Display_16x16(3, 11, shi);
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}
+		}
+	else
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//三色流水
+			LCD_DisplayString(2, 4, "Three flow");
+			//正在测试
+			LCD_DisplayString(3, 5, "Testing");
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+}
+
+static void GUI_display_colour_rotation_4(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//四色流水
+			LCD_Display_16x16(2, 5, si);
+			LCD_Display_16x16(2, 7, se);
+			LCD_Display_16x16(2, 9, liu);
+			LCD_Display_16x16(2, 11, shui);
+			//正在测试
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, ce);
+			LCD_Display_16x16(3, 11, shi);
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}
+		}
+	else
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//四色流水
+			LCD_DisplayString(2, 4, "Four flow");
+			//正在测试
+			LCD_DisplayString(3, 5, "Testing");
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+}
+
+static void GUI_display_colour_rotation_ch(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//单通道流水
+			LCD_Display_16x16(2, 4,  dan);
+			LCD_Display_16x16(2, 6,  tong1);
+			LCD_Display_16x16(2, 8,  dao);
+			LCD_Display_16x16(2, 10, liu);
+			LCD_Display_16x16(2, 12, shui);
+			//通道：
+			LCD_Display_16x16(3, 5,  tong1);
+			LCD_Display_16x16(3, 7,  dao);
+			LCD_DisplayString(3, 9, ":");
+			GUI_display_number(3, 10, rotation_ch_cnt);
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}
+		}
+	else
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//四色流水
+			LCD_DisplayString(2, 4, "Four flow");
+			//正在测试
+			LCD_DisplayString(3, 2, "Channel:");
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+}
+
+static void GUI_display_colour_change_1(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//单色渐变
+			LCD_Display_16x16(2, 5, dan);
+			LCD_Display_16x16(2, 7, se);
+			LCD_Display_16x16(2, 9, jian2);
+			LCD_Display_16x16(2, 11, bian1);
+			//正在测试
+			LCD_Display_16x16(3, 5, zheng1);
+			LCD_Display_16x16(3, 7, zai);
+			LCD_Display_16x16(3, 9, ce);
+			LCD_Display_16x16(3, 11, shi);
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(4, 7, dan);
+					LCD_Display_16x16(4, 9, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  zhu);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(4, 5,  wu);
+					LCD_Display_16x16(4, 7,  xian);
+					LCD_Display_16x16(4, 9,  cong);
+					LCD_Display_16x16(4, 11, ji);
+					break;
+			}
+		}
+	else
+		{
+			//DMX512 | MY9221 | TM1829
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(1, 6, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(1, 6, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(1, 6, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(1, 6, "TM1804");
+					break;
+			}
+			
+			//三色渐变
+			LCD_DisplayString(2, 3, "One change");
+			//正在测试
+			LCD_DisplayString(3, 5, "Testing");
+			
+			//单机 | 无线主机 | 无线从机
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(4, 7, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(4, 6, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(4, 6, "Slave");
+					break;
+			}
+		}
+}
+
+/*-------------------设置界面分割线-----------------*/
+static void GUI_display_setting(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//语言：中文
+			LCD_Display_16x16(1, 3, yu1);
+			LCD_Display_16x16(1, 5, yan1);
+			LCD_DisplayString(1, 7, ":");
+			LCD_Display_16x16(1, 9, zhong);
+			LCD_Display_16x16(1, 11, wen);			
+			//模式：XX
+			LCD_Display_16x16(2, 3, mo);
+			LCD_Display_16x16(2, 5, shi1);
+			LCD_DisplayString(2, 7, ":");
+			//协议：XX
+			LCD_Display_16x16(3, 3, xie);
+			LCD_Display_16x16(3, 5, yi1);
+			LCD_DisplayString(3, 7, ":");
+			
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_Display_16x16(2, 9,  dan);
+					LCD_Display_16x16(2, 11, ji);
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_Display_16x16(2, 9,  wu);
+					LCD_Display_16x16(2, 11, xian);
+					LCD_Display_16x16(2, 13, zhu);
+					LCD_Display_16x16(2, 15, ji);
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_Display_16x16(2, 9,  wu);
+					LCD_Display_16x16(2, 11, xian);
+					LCD_Display_16x16(2, 13, cong);
+					LCD_Display_16x16(2, 15, ji);
+					break;
+				
+				//确保第一次使用时写入默认参数
+				default: 					
+					job_mode = JOB_MODE_SELF;
+					AT24CXX_WriteByte(EEPROM_ADDR_MODE, job_mode);
+					LCD_Display_16x16(2, 9,  dan);
+					LCD_Display_16x16(2, 11, ji);
+					break;
+			}
+			
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(3, 9, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(3, 9, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(3, 9, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(3, 9, "TM1804");
+					break;
+				
+				//确保第一次使用时写入默认参数
+				default: 					
+					modbus = MODBUS_DMX;
+					AT24CXX_WriteByte(EEPROM_ADDR_MODBUS, modbus);
+					LCD_DisplayString(3, 9, "DMX512");
+					break;
+			}
+		}
+	else
+		{
+			//Language:
+			LCD_DisplayString(1, 3, "Language:EN");		
+			//Mode:
+			LCD_DisplayString(2, 3, "Mode:");
+			//Modbus:
+			LCD_DisplayString(3, 3, "Modbus:");
+			
+			switch (job_mode)
+			{
+				case JOB_MODE_SELF:
+					LCD_DisplayString(2, 9, "Self");
+					break;
+				
+				case JOB_MODE_HOST:
+					LCD_DisplayString(2, 9, "Master");
+					break;
+				
+				case JOB_MODE_SLAVE:
+					LCD_DisplayString(2, 9, "Slave");
+					break;
+				
+				//确保第一次使用时写入默认参数
+				default:
+					job_mode = JOB_MODE_SELF;
+					AT24CXX_WriteByte(EEPROM_ADDR_MODE, job_mode);
+					LCD_DisplayString(2, 9, "Self");
+					break;
+			}
+			
+			switch (modbus)
+			{
+				case MODBUS_DMX:
+					LCD_DisplayString(3, 10, "DMX512");
+					break;
+				
+				case MODBUS_9221:
+					LCD_DisplayString(3, 10, "MY9221");
+					break;
+				
+				case MODBUS_1829:
+					LCD_DisplayString(3, 10, "TM1829");
+					break;
+				
+				case MODBUS_1804:
+					LCD_DisplayString(3, 10, "TM1804");
+					break;
+				
+				//确保第一次使用时写入默认参数
+				default:
+					modbus = MODBUS_DMX;
+					AT24CXX_WriteByte(EEPROM_ADDR_MODBUS, modbus);
+					LCD_DisplayString(3, 10, "DMX512");
+					break;
+			}
+		}
+	
+	pointer_col = 2;
+	LCD_Display_Pointer(pointer_row, pointer_col);
+}
+
+/*-------------------系统界面分割线-----------------*/
+static void GUI_display_system(void)
+{
+	LCD_Clear();
+	
+	if (language==LANGUAGE_CHINESE)
+		{
+			//硬件版本
+			LCD_Display_16x16(1, 3, ying);
+			LCD_Display_16x16(1, 5, jian);
+			LCD_Display_16x16(1, 7, ban);
+			LCD_Display_16x16(1, 9, ben);			
+			//软件版本
+			LCD_Display_16x16(2, 3, ruan);
+			LCD_Display_16x16(2, 5, jian);
+			LCD_Display_16x16(2, 7, ban);
+			LCD_Display_16x16(2, 9, ben);			
+			//系统电压
+			LCD_Display_16x16(3, 2, xi);
+			LCD_Display_16x16(3, 4, tong);
+			LCD_Display_16x16(3, 6, dian);
+			LCD_Display_16x16(3, 8, ya);	
+		}
+	else
+		{
+			LCD_DisplayString(1, 3, "Hardware");
+			LCD_DisplayString(2, 3, "Software");
+			LCD_DisplayString(3, 3, "Voltage");
+		}
+	
+	LCD_DisplayString(1, 11, ": .");
+	LCD_Display_Num(1, 12, hardware_version%100/10);
+	LCD_Display_Num(1, 14, hardware_version%10);
+	LCD_DisplayString(2, 11, ": .");
+	LCD_Display_Num(2, 12, software_version%100/10);
+	LCD_Display_Num(2, 14, software_version%10);
+	LCD_DisplayString(3, 10, ": .  V");
+	LCD_Display_Num(3, 11, voltage%1000/100);
+	LCD_Display_Num(3, 13, voltage%100/10);
+	LCD_Display_Num(3, 14, voltage%10);
+}
+
+
+#define   ROT_3_SIZE   144
+const u8 rot_3[ROT_3_SIZE] = { 
+	255, 0, 0,  240, 16, 0,  224, 32, 0,  208, 48, 0,  192, 64, 0,  176, 80, 0,  160, 96, 0,  144, 112, 0,  128, 128, 0,  112, 144, 0,  96, 160, 0,  80, 176, 0,  64, 192, 0,  48, 208, 0,  32, 224, 0,  16, 240, 0,
+	0, 255, 0,  0, 240, 16,  0, 224, 32,  0, 208, 48,  0, 192, 64,  0, 176, 80,  0, 160, 96,  0, 144, 112,  0, 128, 128,  0, 112, 144,  0, 96, 160,  0, 80, 176,  0, 64, 192,  0, 48, 208,  0, 32, 224,  0, 16, 240,
+	0, 0, 255,  16, 0, 240,  32, 0, 224,  48, 0, 208,  64, 0, 192,  80, 0, 176,  96, 0, 160,  112, 0, 144,  128, 0, 128,  144, 0, 112,  160, 0, 96,  176, 0, 80,  192, 0, 64,  208, 0, 48,  224, 0, 32,  240, 0, 16
+};
+
+#define   ROT_4_SIZE   256
+const u8 rot_4[ROT_4_SIZE] = { 
+	255, 0, 0, 0,  240, 16, 0, 0,  224, 32, 0, 0,  208, 48, 0, 0,  192, 64, 0, 0,  176, 80, 0, 0,  160, 96, 0, 0,  144, 112, 0, 0,  128, 128, 0, 0,  112, 144, 0, 0,  96, 160, 0, 0,  80, 176, 0, 0,  64, 192, 0, 0,  48, 208, 0, 0,  32, 224, 0, 0,  16, 240, 0, 0,
+	0, 255, 0, 0,  0, 240, 16, 0,  0, 224, 32, 0,  0, 208, 48, 0,  0, 192, 64, 0,  0, 176, 80, 0,  0, 160, 96, 0,  0, 144, 112, 0,  0, 128, 128, 0,  0, 112, 144, 0,  0, 96, 160, 0,  0, 80, 176, 0,  0, 64, 192, 0,  0, 48, 208, 0,  0, 32, 224, 0,  0, 16, 240, 0,
+	0, 0, 255, 0,  0, 0, 240, 16,  0, 0, 224, 32,  0, 0, 208, 48,  0, 0, 192, 64,  0, 0, 176, 80,  0, 0, 160, 96,  0, 0, 144, 112,  0, 0, 128, 128,  0, 0, 112, 144,  0, 0, 96, 160,  0, 0, 80, 176,  0, 0, 64, 192,  0, 0, 48, 208,  0, 0, 32, 224,  0, 0, 16, 240,
+	0, 0, 0, 255,  16, 0, 0, 240,  32, 0, 0, 224,  48, 0, 0, 208,  64, 0, 0, 192,  80, 0, 0, 176,  96, 0, 0, 160,  112, 0, 0, 144,  128, 0, 0, 128,  144, 0, 0, 112,  160, 0, 0, 96,  176, 0, 0, 80,  192, 0, 0, 64,  208, 0, 0, 48,  224, 0, 0, 32,  240, 0, 0, 16
+};
+/*-------------------调节颜色和花样测试后台任务-----------------*/
+void gui_task(void *pdata)
+{	
+	u16 i;
+	u8 rot_p;
+	u8 tick_cnt = 0;
+	
+	u8 menu_temp;
+	u8 modbus_temp;
+	
+	USART3_init();
+	MY9221_init();
+	
+	OSTaskSuspend(OS_PRIO_SELF);
+	
+	while (1)
+	{
+		if (job_mode == JOB_MODE_SELF)
+			{
+				menu_temp = menu->index;
+				modbus_temp = modbus;
+			}
+		else if (job_mode == JOB_MODE_SLAVE)
+			{
+				menu_temp = recv_menu;
+				modbus_temp = recv_modbus;
+			}
+		
+		switch (menu_temp)
+		{
+			case MENU_INDEX_COLOUR_CHANGE_3:
+				{
+					switch (pattern_step)
+					{
+						case 0:
+							pattern_r--;
+							pattern_g++;
+							pattern_b = 0;
+							if (pattern_r==0) pattern_step++;
+							break;
+						
+						case 1:
+							pattern_r = 0;
+							pattern_g--;
+							pattern_b++;
+							if (pattern_g==0) pattern_step++;
+							break;
+						
+						case 2:
+							pattern_r++;
+							pattern_g = 0;
+							pattern_b--;					
+							if (pattern_b==0) pattern_step = 0;
+							break;
+					}
+					
+					for (i=1; i<CH_SIZE; i+=3)
+					{
+						channel[i] = pattern_r;
+						channel[i+1] = pattern_g;
+						channel[i+2] = pattern_b;
+					}
+				}
+				break;
+				
+			case MENU_INDEX_COLOUR_CHANGE_4:
+				{
+					switch (pattern_step)
+					{
+						case 0:
+							pattern_r--;
+							pattern_g++;
+							pattern_b = 0;
+							pattern_w = 0;
+							if (pattern_r==0) pattern_step++;
+							break;
+						
+						case 1:
+							pattern_r = 0;
+							pattern_g--;
+							pattern_b++;
+							pattern_w = 0;
+							if (pattern_g==0) pattern_step++;
+							break;
+						
+						case 2:
+							pattern_r = 0;
+							pattern_g = 0;
+							pattern_b--;
+							pattern_w++;
+							if (pattern_b==0) pattern_step++;
+							break;
+						
+						case 3:
+							pattern_r++;
+							pattern_g = 0;
+							pattern_b = 0;
+							pattern_w--;
+							if (pattern_w==0) pattern_step = 0;
+							break;
+					}
+					
+					for (i=1; i<CH_SIZE; i+=4)
+					{
+						channel[i] = pattern_r;
+						channel[i+1] = pattern_g;
+						channel[i+2] = pattern_b;
+						channel[i+3] = pattern_w;
+					}
+				}
+				break;
+				
+			case MENU_INDEX_COLOUR_ROTATION_3:
+				{							
+					pattern_step++;
+					pattern_step %= ROT_3_SIZE/3; 
+					
+					rot_p = pattern_step * 3;
+			
+					for (i=1; i<CH_SIZE; i+=3)
+					{
+						channel[i] = rot_3[rot_p];
+						channel[i+1] = rot_3[rot_p+1];
+						channel[i+2] = rot_3[rot_p+2];
+						rot_p += 3;
+						rot_p %= ROT_3_SIZE;
+					}						
+				}
+				break;
+				
+			case MENU_INDEX_COLOUR_ROTATION_4:
+				{
+					pattern_step++;
+					pattern_step %= ROT_4_SIZE/4; 
+					
+					rot_p = pattern_step * 4;
+			
+					for (i=1; i<CH_SIZE; i+=4)
+					{
+						channel[i] = rot_4[rot_p];
+						channel[i+1] = rot_4[rot_p+1];
+						channel[i+2] = rot_4[rot_p+2];
+						channel[i+3] = rot_4[rot_p+3];
+						rot_p += 4;
+						rot_p %= ROT_4_SIZE;
+					}	
+				}
+				break;
+			
+			case MENU_INDEX_COLOUR_ROTATION_CH:
+				{
+					if (rotation_ch_status==0)
+						{
+							if (++tick_cnt==10) //600ms
+								{
+									tick_cnt = 0;
+																		
+									if (++rotation_ch_cnt==(CH_SIZE+1))
+										rotation_ch_cnt = 1;	
+									
+									for (i=1; i<CH_SIZE; i++)
+										channel[i] = 0x00;
+									
+									channel[rotation_ch_cnt] = 0xFF;		
+									
+									GUI_clear_number(3, 10);
+									GUI_display_number(3, 10, rotation_ch_cnt);							
+								}
+						}						
+				}
+				break;
+				
+			case MENU_INDEX_COLOUR_CHANGE_1:
+				{
+					switch (pattern_step)
+					{
+						case 0:
+							if (--pattern_r==0) pattern_step++;
+							break;
+						
+						case 1:
+							if (++pattern_r==0xFF) pattern_step--;
+							break;
+					}
+					
+					for (i=1; i<CH_SIZE; i++)
+					{
+						channel[i] = pattern_r;
+					}
+				}
+				break;
+		}
+							
+		switch (modbus_temp)
+		{
+			case MODBUS_DMX:					
+				SendUart3DMX(channel, CH_SIZE);
+				OSTimeDly(40/OS_TICK);
+				break;
+			
+			case MODBUS_9221:
+				SendMY9221(&channel[1], CH_SIZE-1);
+				OSTimeDly(40/OS_TICK);
+				break;
+			
+			case MODBUS_1829:
+				TM1829_WriteCurrent(18, 18, 18);
+				SendTM1829(&channel[1], CH_SIZE-1);
+				OSTimeDly(40/OS_TICK);
+				break;
+			
+			case MODBUS_1804:
+				SendTM1829(&channel[1], CH_SIZE-1);
+				OSTimeDly(40/OS_TICK);
+				break;
+		}		
+	}
+}
+
