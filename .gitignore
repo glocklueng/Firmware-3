@@ -49,9 +49,13 @@
 *.d
 *.axf
 *.tra
-*.dep        
+*.dep
+        
 JLinkLog.txt
 *.iex
 *.htm
 *.sct
 *.map
+
+# IAR
+Object/Debug/*
