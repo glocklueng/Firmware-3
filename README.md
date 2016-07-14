@@ -4,5 +4,5 @@
 # DMX512-Tool
 手持调试机源代码，基于uCOSII
 
-# SmartDIM-repository
+# SmartDIM-RFID
 RFID修改参数配置的定时器，使用SL3S4011存储芯片
