@@ -21,6 +21,9 @@ void MY9221_init(void)
 	//MY9221_DATA & MY9221_CLK
 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1 | GPIO_Pin_0;	
 	GPIO_Init(GPIOC, &GPIO_InitStructure);
+	
+	MY9221_DATA = 1;
+	MY9221_CLK = 1;
 }
 
 void MY9221_data(u16 data)

@@ -133,11 +133,7 @@ void InitPower()
 				if (++PWM_VAL == percent_temp)
 					{
 						if (percent_temp == 100)
-							{
-								PWM_OUT_FILL();
-								
-							}
-							
+							PWM_OUT_FILL();
 						//else
 							//PWM_OUT_NOT_FILL();
 					}

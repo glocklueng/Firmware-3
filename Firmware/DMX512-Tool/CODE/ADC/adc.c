@@ -11,6 +11,7 @@
 #include "gui.h"
 #include "lcd.h"
 #include "led.h"
+#include "power.h"
 
 OS_STK ADC_TASK_STK[ADC_STK_SIZE];
 
@@ -80,6 +81,7 @@ static void SortAdcBuff(u16 *buff, u8 n)
 void adc_task(void *pdata)
 {
 	u8 i;
+	u32 t;
 	
 	//USART1_init();
 	ADC_init();
@@ -114,13 +116,12 @@ void adc_task(void *pdata)
 				
 				if (voltage < 335)
 					{
-						led_status_switch(LED_STATUS_LOW_VOLTAGE);
+						GUI_display_shutdown();
+						OSTimeDly(12/OS_TICK);
+						OSRunning = FALSE;
+						for (t=0; t<16000000UL; t++);
+						POWER_EN = 0;
 					}
-				else
-					{
-						led_status_switch(LED_STATUS_NORMAL);
-					}
-				
 				
 //				SendUart1((u8 *)&voltage, 1);
 //				OSTimeDly(1);

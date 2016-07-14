@@ -9,13 +9,13 @@
 /*------------------------------*
 *  macros for configurations    *
 *-------------------------------*/
-#define   I2C_SCL_SetOut()   GPIO_Init(GPIOC, GPIO_PIN_3, GPIO_MODE_OUT_OD_HIZ_FAST)
-#define   I2C_SDA_SetOut()   GPIO_Init(GPIOC, GPIO_PIN_4, GPIO_MODE_OUT_OD_HIZ_FAST)
-#define   I2C_SDA_SetIn()    GPIO_Init(GPIOC, GPIO_PIN_4, GPIO_MODE_IN_FL_NO_IT)
+#define   I2C_SCL_SetOut()   GPIO_Init(GPIOC, GPIO_PIN_4, GPIO_MODE_OUT_OD_HIZ_FAST)
+#define   I2C_SDA_SetOut()   GPIO_Init(GPIOC, GPIO_PIN_3, GPIO_MODE_OUT_OD_HIZ_FAST)
+#define   I2C_SDA_SetIn()    GPIO_Init(GPIOC, GPIO_PIN_3, GPIO_MODE_IN_FL_NO_IT)
 
-#define   SCL_OUT   PCout(3)
-#define   SDA_OUT   PCout(4)
-#define   SDA_IN    PCin(4)
+#define   SCL_OUT   PCout(4)
+#define   SDA_OUT   PCout(3)
+#define   SDA_IN    PCin(3)
 
 /*------------------------------*
 *  public functions             *

@@ -222,6 +222,7 @@ extern void YT_send_gamma_2_2(void);
 extern void YT_send_gamma_3_0(void);
 extern void GUI_display_number(u8 row, u8 col, u16 num);
 extern void GUI_clear_number(u8 row, u8 col);
+extern void GUI_display_shutdown(void);
 
 /*------------------------------*
 *  others for task *

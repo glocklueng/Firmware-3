@@ -159,7 +159,8 @@ static void key_up_function(void)
 	 || (menu->index == MENU_INDEX_COLOUR_CHANGE_4)   
 	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_3)
 	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_4) 
-	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_CH))
+	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_CH)
+	 || (menu->index == MENU_INDEX_COLOUR_CHANGE_1))
 	  return;
 	
 	if (menu->ChildrenMenuTotal > 4) //多于4个子菜单先移动Pointer再移动display
@@ -198,7 +199,8 @@ static void key_down_function(void)
 	 || (menu->index == MENU_INDEX_COLOUR_CHANGE_4)   
 	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_3)
 	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_4) 
-	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_CH))
+	 || (menu->index == MENU_INDEX_COLOUR_ROTATION_CH)
+	 || (menu->index == MENU_INDEX_COLOUR_CHANGE_1))
 	  return;
 	
 	if (menu->ChildrenMenuTotal > 4) //多于4个子菜单先移动Pointer再移动display
