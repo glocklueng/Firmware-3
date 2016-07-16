@@ -3,7 +3,6 @@
 #include "led.h"
 #include "uart.h"
 #include "debug.h"
-//#include "r804b.h"
 #include "ds3231.h"
 #include "s4011.h"
 #include "flash.h"
@@ -20,7 +19,6 @@ void main(void)
 	
 #if DEBUG_EN > 0
 	InitDebug();
-	SendDebugByte(0x55);
 #endif
 	
 	init_eeprom_paraments();

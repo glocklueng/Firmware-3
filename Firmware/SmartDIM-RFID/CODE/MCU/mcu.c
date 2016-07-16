@@ -122,6 +122,8 @@ void InitDevice()
 #if RTC_EN > 0
 	DS_I2C_init();
 #endif
+
+	GPIO_Init(GPIOA, GPIO_PIN_2, GPIO_MODE_OUT_PP_HIGH_FAST);
 	
 	EnableInterrupt();
 }

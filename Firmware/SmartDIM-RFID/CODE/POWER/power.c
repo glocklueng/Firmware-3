@@ -111,6 +111,8 @@ void InitPower()
 	u32 next_pwm_time;
 	
 	PWM_VAL = PWM_INITIAL;
+	sys.delay_ms(300);
+	POWER_EN = 1;
 
 	percent_val = S4011_ReadByte(S4011_ADDR_PERCENT);
 	

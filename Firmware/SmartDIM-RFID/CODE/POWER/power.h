@@ -10,6 +10,8 @@
 /*------------------------------*
 *  macros for configurations    *
 *-------------------------------*/
+#define   POWER_EN   PAout(2)
+
 #define   PWM_CH    1
 #define   PWM_VAL   TIM2->CCR1L
 
