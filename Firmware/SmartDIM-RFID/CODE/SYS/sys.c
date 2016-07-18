@@ -80,64 +80,64 @@ void SetSoftwarePriority(u8 vector, u8 level)
 {
 	u8 Mask = 0;
 	u8 NewPriority = 0;
-  
-  Mask = (u8)(~(u8)(0x03U << ((vector % 4U) * 2U)));
-  
-  NewPriority = (u8)((level) << ((vector % 4U) * 2U));
-  
-  switch (vector)
-  {
-  	case ITC_IRQ_TLI:
-  	case ITC_IRQ_AWU:
-  	case ITC_IRQ_CLK:
-  	case ITC_IRQ_PORTA:	
-  		ITC->ISPR1 &= Mask;
-  		ITC->ISPR1 |= NewPriority;
-  		break;
-  		
-  	case ITC_IRQ_PORTB:
-  	case ITC_IRQ_PORTC:
-  	case ITC_IRQ_PORTD:
-  	case ITC_IRQ_PORTE:
-  		ITC->ISPR2 &= Mask;
-  		ITC->ISPR2 |= NewPriority;
-  		break;
-  		
-  	case ITC_IRQ_SPI:
-  	case ITC_IRQ_TIM1_OVF:
-  		ITC->ISPR3 &= Mask;
-  		ITC->ISPR3 |= NewPriority;
-  		break;
-  	
-  	case ITC_IRQ_TIM1_CAPCOM:
-  	case ITC_IRQ_TIM2_OVF:
-  	case ITC_IRQ_TIM2_CAPCOM:
-  	case ITC_IRQ_TIM3_OVF:
-  		ITC->ISPR4 &= Mask;
-  		ITC->ISPR4 |= NewPriority;
-  		break;
-  	
-  	case ITC_IRQ_TIM3_CAPCOM:
-  	case ITC_IRQ_UART1_TX:
-  	case ITC_IRQ_UART1_RX:
-  	case ITC_IRQ_I2C:
-  		ITC->ISPR5 &= Mask;
-  		ITC->ISPR5 |= NewPriority;
-  		break;
-  	
-  	case ITC_IRQ_ADC1:
-  	case ITC_IRQ_TIM4_OVF:
-  		ITC->ISPR6 &= Mask;
-  		ITC->ISPR6 |= NewPriority;
-  		break;
-  	
-  	case ITC_IRQ_EEPROM_EEC:
-  		ITC->ISPR7 &= Mask;
-  		ITC->ISPR7 |= NewPriority;
-  		break;
-  	
-  	default:
-  		break;
-  }
+	
+	Mask = (u8)(~(u8)(0x03U << ((vector % 4U) * 2U)));
+	
+	NewPriority = (u8)((level) << ((vector % 4U) * 2U));
+	
+	switch (vector)
+	{
+		case ITC_IRQ_TLI:
+		case ITC_IRQ_AWU:
+		case ITC_IRQ_CLK:
+		case ITC_IRQ_PORTA:	
+			ITC->ISPR1 &= Mask;
+			ITC->ISPR1 |= NewPriority;
+			break;
+			
+		case ITC_IRQ_PORTB:
+		case ITC_IRQ_PORTC:
+		case ITC_IRQ_PORTD:
+		case ITC_IRQ_PORTE:
+			ITC->ISPR2 &= Mask;
+			ITC->ISPR2 |= NewPriority;
+			break;
+			
+		case ITC_IRQ_SPI:
+		case ITC_IRQ_TIM1_OVF:
+			ITC->ISPR3 &= Mask;
+			ITC->ISPR3 |= NewPriority;
+			break;
+			
+		case ITC_IRQ_TIM1_CAPCOM:
+		case ITC_IRQ_TIM2_OVF:
+		case ITC_IRQ_TIM2_CAPCOM:
+		case ITC_IRQ_TIM3_OVF:
+			ITC->ISPR4 &= Mask;
+			ITC->ISPR4 |= NewPriority;
+			break;
+			
+		case ITC_IRQ_TIM3_CAPCOM:
+		case ITC_IRQ_UART1_TX:
+		case ITC_IRQ_UART1_RX:
+		case ITC_IRQ_I2C:
+			ITC->ISPR5 &= Mask;
+			ITC->ISPR5 |= NewPriority;
+			break;
+			
+		case ITC_IRQ_ADC1:
+		case ITC_IRQ_TIM4_OVF:
+			ITC->ISPR6 &= Mask;
+			ITC->ISPR6 |= NewPriority;
+			break;
+			
+		case ITC_IRQ_EEPROM_EEC:
+			ITC->ISPR7 &= Mask;
+			ITC->ISPR7 |= NewPriority;
+			break;
+			
+		default:
+			break;
+	}
 }
 
