@@ -44,12 +44,12 @@ static void SendUart1(u16 len)
 //}
 
 INTERRUPT_HANDLER(UART1_TX_IRQHandler, ITC_IRQ_UART1_TX)
-{	
-  CLEAR_UART1_IT_TC;
+{
+	CLEAR_UART1_IT_TC;
   
   if (Uart1Tx.busy)
   	{
-  		if (--Uart1Tx.size != 0)  
+  		if (--Uart1Tx.size != 0)
   			{
   				UART1->DR = Uart1Tx.buff[Uart1Tx.cnt++];
   			}
@@ -58,7 +58,7 @@ INTERRUPT_HANDLER(UART1_TX_IRQHandler, ITC_IRQ_UART1_TX)
   				UART1_485_RX;
   				Uart1Tx.busy = 0;
   			}
-  	} 
+  	}
 }
 
 INTERRUPT_HANDLER(UART1_RX_IRQHandler, ITC_IRQ_UART1_RX)

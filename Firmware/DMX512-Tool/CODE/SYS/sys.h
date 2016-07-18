@@ -10,7 +10,7 @@
 /*------------------------------*
 *  macros for configurations    *
 *-------------------------------*/
-#define   WIRELESS_EN     0
+#define   WIRELESS_EN     1
 #define   MENU_EXTRA_EN   0
 
 /*------------------------------*

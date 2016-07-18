@@ -1,7 +1,6 @@
 #include "mcu.h"
 #include "uart.h"
 #include "led.h"
-#include "uart.h"
 #include "debug.h"
 #include "ds3231.h"
 #include "s4011.h"
@@ -24,7 +23,7 @@ void main(void)
 	init_eeprom_paraments();
 	
 	LED_R = LED_OFF;
-  LED_G = LED_OFF;
+	LED_G = LED_OFF;
   
 #ifdef UART1_485_RX
 	UART1_485_RX;
