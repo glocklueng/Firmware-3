@@ -117,7 +117,7 @@ void InitPower()
 	percent_val = S4011_ReadByte(S4011_ADDR_PERCENT);
 	
 	if ((percent_val < 20) || (percent_val > 100)) //防出错设定默认值
-		percent_val = 30;
+		percent_val = 100;
 		
 	InitTime(); //初始化时间变量
 

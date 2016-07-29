@@ -1180,8 +1180,10 @@ void YT_send_address_start(void)
 void YT_send_data(u16 num, u16 addr_interval, u16 addr)
 {
 	u8 t;
+	u16 cnt;
 	
-	while (addr < 512)
+	cnt = 0;
+	while ((addr<512) && (cnt<520))
 	{
 		for (t=3; t!=0; t--)
 		{
@@ -1225,6 +1227,7 @@ void YT_send_data(u16 num, u16 addr_interval, u16 addr)
 		
 		num++;
 		addr += addr_interval;
+		cnt++;
 	}
 }
 
